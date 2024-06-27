@@ -1,2 +1,3 @@
 # Aus_phenology
-Exploring trends in Australian plant phenology
+
+Exploring long-term trends in Australian land surface phenology
