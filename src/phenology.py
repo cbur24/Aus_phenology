@@ -13,9 +13,15 @@ import xarray as xr
 import pandas as pd
 import scipy.signal
 import warnings
+from odc.geo.xr import assign_crs
 warnings.simplefilter('ignore')
 
-def extract_peaks_troughs(input_dict, rolling=90, distance=6, prominence='auto', plateau_size=2):
+def extract_peaks_troughs(input_dict,
+                          rolling=90,
+                          distance=90,
+                          prominence='auto',
+                          plateau_size=10
+                         ):
     """
     Identifying peaks and troughs in a vegetation index time series
 
@@ -40,14 +46,32 @@ def extract_peaks_troughs(input_dict, rolling=90, distance=6, prominence='auto',
     """
     peaks_troughs = {}
     for k in input_dict.keys():
+        
+        #grab the data
+        ds = input_dict[k]
+
+        #check its an array
+        if not isinstance(ds, xr.DataArray):
+            raise TypeError(
+                "This function only excepts an xr.DataArray"
+            )
+        #doesn't matter what we call the variable just
+        #need it to be predicatable
+        ds.name = 'NDVI'
+        
+        #ensure ds has only time coordinates
+        coords = list(ds.coords)
+        coords.remove('time')
+        ds = ds.drop(coords)
+
         #calculate rolling min/max to find local minima maxima
-        roll_max = input_dict[k].rolling(time=90, min_periods=1, center=True).max()
-        roll_min = input_dict[k].rolling(time=90, min_periods=1, center=True).min()
+        roll_max = ds.rolling(time=90, min_periods=1, center=True).max()
+        roll_min = ds.rolling(time=90, min_periods=1, center=True).min()
     
         if prominence=='auto':
             #dynamically determine how prominent a peak needs to be
             #based upon typical range of seasonal cycle
-            clim = input_dict[k].groupby('time.month').mean()
+            clim = ds.groupby('time.month').mean()
             _range = (clim.max() - clim.min()).values.item()
             if _range>=0.05:
                 prominence = 0.01
@@ -64,15 +88,15 @@ def extract_peaks_troughs(input_dict, rolling=90, distance=6, prominence='auto',
                             distance=distance,
                             prominence=prominence,
                             plateau_size=plateau_size)[0]
-        
+
         #--------------cleaning-------
         # Identify where two peaks or two valleys occur one after another and remove.
         # i.e. enforcing the pattern peak-vally-peak-valleys etc.
-        # First get the peaks and troughs into a dataframe with matching time index 
-        df = input_dict[k].drop_vars('spatial_ref').to_dataframe()
-        df['peaks'] = input_dict[k].isel(time=peaks).drop_vars('spatial_ref').to_dataframe()
-        df['troughs'] = input_dict[k].isel(time=troughs).drop_vars('spatial_ref').to_dataframe()
-        df_peaks_troughs = df.drop('NDVI',axis=1).dropna(how='all')
+        # First get the peaks and troughs into a dataframe with matching time index
+        df = ds.to_dataframe()
+        df['peaks'] = ds.isel(time=peaks).to_dataframe()
+        df['troughs'] = ds.isel(time=troughs).to_dataframe()
+        df_peaks_troughs = df.drop('NDVI', axis=1).dropna(how='all')
 
         #find where two peaks or two troughs occur sequentially
         peaks_num_nans = df_peaks_troughs.peaks.isnull().rolling(2).sum()
@@ -110,7 +134,14 @@ def extract_peaks_troughs(input_dict, rolling=90, distance=6, prominence='auto',
     return peaks_troughs
 
 
-def phenometrics(input_dict, rolling=90,distance=180, prominence='auto', plateau_size=2, amplitude=0.20):
+def phenometrics(input_dict,
+                 rolling=90,
+                 distance=90,
+                 prominence='auto',
+                 plateau_size=10,
+                 amplitude=0.20,
+                 verbose=True
+                ):
     """
     Calculate statistics that describe the phenology cycle of
     a vegetation condition time series.
@@ -156,7 +187,8 @@ def phenometrics(input_dict, rolling=90,distance=180, prominence='auto', plateau
     eco_regions_phenometrics = {}
     i=0
     for k,v in input_dict.items():
-        print("Feature {:02}/{:02}\r".format(i + 1, len(range(0, len(input_dict)))), end="")
+        if verbose:
+            print("Feature {:02}/{:02}\r".format(i + 1, len(range(0, len(input_dict)))), end="")
     
         # start the timeseries with trough
         if np.isnan(peaks_troughs[k].iloc[0].troughs):
