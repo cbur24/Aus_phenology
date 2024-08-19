@@ -65,8 +65,8 @@ def extract_peaks_troughs(input_dict,
         ds = ds.drop(coords)
 
         #calculate rolling min/max to find local minima maxima
-        roll_max = ds.rolling(time=90, min_periods=1, center=True).max()
-        roll_min = ds.rolling(time=90, min_periods=1, center=True).min()
+        roll_max = ds.rolling(time=rolling, min_periods=1, center=True).max()
+        roll_min = ds.rolling(time=rolling, min_periods=1, center=True).min()
     
         if prominence=='auto':
             #dynamically determine how prominent a peak needs to be
