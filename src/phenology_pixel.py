@@ -57,12 +57,12 @@ def _preprocess(d, dd):
     #now we can finally interpolate to daily
     d = d.resample(time='1D').interpolate(kind='quadratic').astype('float32')
     
-    # We also need the shape of the stacked array
-    shape = d.stack(spatial=('latitude', 'longitude')).values.shape
-    
     #stack spatial indexes, this makes it easy to loop through data
     y_stack = d.stack(spatial=('latitude', 'longitude'))
     Y = y_stack.transpose('time', 'spatial')
+    
+    # We also need the shape of the stacked array
+    shape = y_stack.values.shape
     
     # find spatial indexes where values are mostly NaN (mostly land-sea mask)
     # This is where the nan_mask we created earlier = True
@@ -95,8 +95,7 @@ def _extract_peaks_troughs(da,
     
     returns:
     --------
-    A dictionary with keys the same as the input and the values a pandas.dataframe with peaks
-    and trough identified by the time stamp they occur.
+    A pandas.dataframe with peaks and trough identified by the time stamp they occur.
     
     """
     #check its an array
@@ -104,9 +103,8 @@ def _extract_peaks_troughs(da,
         raise TypeError(
             "This function only excepts an xr.DataArray"
         )
-    #doesn't matter what we call the variable just
-    #need it to be predicatable
-    # da = Y.isel(spatial=i)
+    # doesn't matter what we call the variable just
+    # need it to be predicatable
     da.name = 'NDVI'
     
     #ensure da has only time coordinates
@@ -141,7 +139,7 @@ def _extract_peaks_troughs(da,
     
     #--------------cleaning-------
     # Identify where two peaks or two valleys occur one after another and remove.
-    # i.e. enforcing the pattern peak-vally-peak-valleys etc.
+    # i.e. enforcing the pattern peak-valley-peak-valley etc.
     # First get the peaks and troughs into a dataframe with matching time index
     df = da.to_dataframe()
     df['peaks'] = da.isel(time=peaks).to_dataframe()
@@ -194,7 +192,7 @@ def xr_phenometrics(da,
     
     Identifies the start and end points of each cycle using 
     the `seasonal amplitude` method. When the vegetation time series reaches
-    20% of the sesonal amplitude between the first minimum and the peak,
+    20% of the seasonal amplitude between the first minimum and the peak,
     and the peak and the second minimum.
     
     To ensure we are measuring only full cycles we enforce the time series to
@@ -250,21 +248,24 @@ def xr_phenometrics(da,
         # now extract the NDVI time series for the cycle
         ndvi_cycle = da.sel(time=slice(start_time, end_time)).squeeze()
 
-        # add the stats to this
+        # add the stats to this dict
         vars = {}
        
         # --Extract phenometrics---------------------------------
+        # Peaks
         pos = ndvi_cycle.idxmax(skipna=True)
         vars['POS_year'] = pos.dt.year #so we can keep track
         vars['POS'] = pos.dt.dayofyear.values
         vars['vPOS'] = ndvi_cycle.max().values
+
+        # Troughs
         #we want the trough values from the beginning of the season only (left side)
         vars['TOS_year'] =  p_t.iloc[p_t.index.get_loc(peaks)-1].name.year
         vars['TOS'] = p_t.iloc[p_t.index.get_loc(peaks)-1].name.dayofyear
         vars['vTOS'] = p_t.iloc[p_t.index.get_loc(peaks)-1].troughs
         vars['AOS'] = (vars['vPOS'] - vars['vTOS'])
         
-        #SOS ------ 
+        # SOS  
         # Find the greening cycle (left of the POS)
         greenup = ndvi_cycle.where(ndvi_cycle.time <= pos)
         # Find absolute distance between 20% of the AOS and the values of the greenup, then
@@ -274,7 +275,7 @@ def xr_phenometrics(da,
         vars['SOS'] = sos.dt.dayofyear.values
         vars['vSOS'] = ndvi_cycle.sel(time=sos).values
         
-        #EOS ------
+        # EOS
         # Find the senescing cycle (right of the POS)
         browning = ndvi_cycle.where(ndvi_cycle.time >= ndvi_cycle.idxmax(skipna=True))
         # Find absolute distance between 20% of the AOS and the values of the browning, then
@@ -285,7 +286,7 @@ def xr_phenometrics(da,
         vars['EOS'] = eos.dt.dayofyear.values
         vars['vEOS'] = ndvi_cycle.sel(time=eos).values
     
-        # LOS ---
+        # LOS
         los = (pd.to_datetime(eos.values) - pd.to_datetime(sos.values)).days
         vars['LOS'] = los
     
@@ -299,14 +300,15 @@ def xr_phenometrics(da,
         vars['ROS'] = (vars['vEOS'] - vars['vPOS']) / ((pd.to_datetime(eos.values) - pd.to_datetime(pos.values)).days) 
         
         pheno[idx] = vars
-    
+
+    # convert to xarray
     ds = pd.DataFrame(pheno).astype('float32').transpose().to_xarray()
-    
+
+    # tidy up and add spatial coords.
     ds = ds.astype(np.float32)
     lat = da.latitude.item()
     lon = da.longitude.item()
     ds.assign_coords(latitude=lat, longitude=lon)
-    
     for var in ds.data_vars:
         ds[var] = ds[var].expand_dims(latitude=[lat], longitude = [lon])
     
@@ -315,7 +317,8 @@ def xr_phenometrics(da,
 def mk_with_slopes(x_old, alpha = 0.05):
     """
     This function checks the Mann-Kendall (MK) test (Mann 1945, Kendall 1975, Gilbert 1987).
-    This was modified from pymannkendall library to return fewer statistics.
+    This was modified from pymannkendall library to return fewer statistics which makes
+    it a little more robust.
     
     Input:
         x: a vector (list, numpy array or pandas series) data
@@ -326,7 +329,7 @@ def mk_with_slopes(x_old, alpha = 0.05):
         intercept: intercept of Kendall-Theil Robust Line
         
     """
-    res = namedtuple('Mann_Kendall_Test', ['p','slope', 'intercept'])
+    res = namedtuple('Mann_Kendall_Test', ['p','slope','intercept'])
     x, c = __preprocessing(x_old)
     x, n = __missing_values_analysis(x, method = 'skip')
     
@@ -340,23 +343,26 @@ def mk_with_slopes(x_old, alpha = 0.05):
     return res(p, slope, intercept)
 
 
-
 @dask.delayed
 def phenology_trends(ds, vars):
+    """
+    Calculate robust statistics over phenology
+    time series using MannKendal/Theil-Sen.
+    """
     slopes=[]
     p_values=[]
     intercept=[]
     for var in vars:
 
         #apply mankendall over 'index' dimension
-        #this return 9 variables 
+        #this return three variables 
         out = xr.apply_ufunc(mk_with_slopes,
                       ds[var],
                       input_core_dims=[["index"]],
                       output_core_dims=[[],[],[],],
                       vectorize=True)
         
-        #grab just the slope and p-value
+        #grab the slopes and p-value
         p = out[0].rename(var+'_p_value')
         s = out[1].rename(var+'_slope')
         i = out[2].rename(var+'_intercept')
@@ -382,10 +388,10 @@ def _mean(ds):
     if ds.vPOS.isel(index=0).values.item() == -99.0:
         dd = ds.mean('index')
         
-    else: # otherwise do the slow median
+    else: # otherwise do the (very) slow median
         dd = ds.median('index')
 
-    # add new variable with len of seasons
+    # add new variable with number of seasons
     dd['n_seasons'] = n_seasons
     dd['n_seasons'] = dd['n_seasons'].expand_dims(latitude=dd.latitude,
                                                   longitude=dd.longitude
@@ -399,7 +405,12 @@ def xr_parcorr(
     pheno_var='IOS',
     rolling=5,
     modelling_vars=['vPOS','vSOS','vEOS','SOS','POS','EOS','LOS']
-):   
+):  
+    """
+    Find the partial correlation coefficients between a phenology metric (IOS)
+    and the other phenometrics.
+    """
+    
     #check if this is a no-data pixel
     if pheno.vPOS.isel(index=0).values.item() == -99.0:
         p_corr = template.copy() #use our template    
@@ -435,6 +446,16 @@ def pls_modelling(
     rolling=5,
     modelling_vars=['co2','srad', 'rain','tavg', 'vpd']
 ):
+    """
+    Develop a partial least squares regression model between
+    a phenological variable and a sequence of modelling covariables 
+    such as climate data. 
+
+    returns:
+    --------
+    An xarray dataset with regression coefficients, along with 
+    slope, p-values, and r2 values for actual and predicted.
+    """
     
     #-------Get phenometrics and covariables in the same frame-------
     def months_filter(month, start, end):
@@ -503,10 +524,11 @@ def pls_modelling(
         #now add our phenometric to the covars-we have a neat object to work with
         c[pheno_var] = pheno_variable
         
-        #---------------PLS modelling----------------------------------------------------------------------
+        #---------------PLS modelling---------------------------------------------------
+        
         # fit PLS on rolling annuals to remove some of the IAV (only interested in trends)
-        df = c.rolling(year=rolling, min_periods=rolling).mean().to_dataframe()
-        df = df.dropna()
+        df = c.rolling(year=rolling, min_periods=rolling).mean().to_dataframe().dropna()
+        
         #fit a model with all vars
         x = df[modelling_vars]
         y = df[pheno_var]
