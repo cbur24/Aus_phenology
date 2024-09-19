@@ -8,6 +8,7 @@ and parallelizes with dask.delayed.
 import os
 import sys
 import math
+import shap
 import scipy
 import numpy as np
 import xarray as xr
@@ -19,6 +20,7 @@ from datetime import datetime
 from collections import namedtuple
 from odc.geo.xr import assign_crs
 from sklearn.metrics import r2_score
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.cross_decomposition import PLSRegression
 from pymannkendall.pymannkendall import __preprocessing, __missing_values_analysis, __mk_score, __variance_s, __z_score, __p_value, sens_slope
 
@@ -436,20 +438,23 @@ def xr_parcorr(
     
     return p_corr
 
+def months_filter(month, start, end):
+    return (month >= start) & (month <= end)
 
 @dask.delayed
-def pls_modelling(
+def regression_attribution(
     pheno, #pheno data
     X, #covariables,
     template,
+    model_type='PLS',
     pheno_var='vPOS',
     rolling=5,
     modelling_vars=['co2','srad', 'rain','tavg', 'vpd']
 ):
     """
-    Develop a partial least squares regression model between
-    a phenological variable and a sequence of modelling covariables 
-    such as climate data. 
+    Develop a partial least squares regression model or
+    ML model between a phenological variable and modelling
+    covariables such as climate data. 
 
     returns:
     --------
@@ -458,9 +463,6 @@ def pls_modelling(
     """
     
     #-------Get phenometrics and covariables in the same frame-------
-    def months_filter(month, start, end):
-        return (month >= start) & (month <= end)
-
     #check if this is a no-data pixel
     if pheno.vPOS.isel(index=0).values.item() == -99.0:
         fi = template.copy() #use our template    
@@ -524,48 +526,70 @@ def pls_modelling(
         #now add our phenometric to the covars-we have a neat object to work with
         c[pheno_var] = pheno_variable
         
-        #---------------PLS modelling---------------------------------------------------
-        
+        #--------------- modelling---------------------------------------------------
         # fit PLS on rolling annuals to remove some of the IAV (only interested in trends)
         df = c.rolling(year=rolling, min_periods=rolling).mean().to_dataframe().dropna()
         
         #fit a model with all vars
         x = df[modelling_vars]
-        y = df[pheno_var]
-        lr = PLSRegression().fit(x, y)
-        prediction = lr.predict(x)
-        r2_all = r2_score(y, prediction)
+        y = df[pheno_var]        
         
-        # Find the robust slope of actual
-        result_actual = mk.original_test(y, alpha=0.05)
-        p_actual = result_actual.p
-        s_actual = result_actual.slope
-        i_actual = result_actual.intercept
-        
-        #calculate slope of predicted variable with all params
-        result_prediction = mk.original_test(prediction, alpha=0.05)
-        p_prediction = result_prediction.p
-        s_prediction = result_prediction.slope
-        i_prediction = result_prediction.intercept
+        if model_type=='ML':
+            #fit a RF model with all vars
+            rf = RandomForestRegressor(n_estimators=100).fit(x, y)
+            
+            # use SHAP to extract importance
+            explainer = shap.Explainer(rf)
+            shap_values = explainer(x)
+            
+            #get SHAP values into a neat DF
+            df_shap = pd.DataFrame(data=shap_values.values,columns=x.columns)
+            df_fi = pd.DataFrame(columns=['feature','importance'])
+            for col in df_shap.columns:
+                importance = df_shap[col].abs().mean()
+                df_fi.loc[len(df_fi)] = [col,importance]
     
-        #get the PLS coefficients
-        fi = pd.Series(dict(zip(list(x.columns), list(lr.coef_.reshape(len(x.columns)))))).to_frame()
-        fi = fi.rename({0:'PLS_coefficent'},axis=1)
-        fi = fi.reset_index().rename({'index':'feature'},axis=1).set_index('feature')
+            # Tidy up into dataset
+            fi = df_fi.set_index('feature').to_xarray().expand_dims(latitude=[lat],longitude=[lon])
+
+        if model_type=='PLS':
+            lr = PLSRegression().fit(x, y)
+            prediction = lr.predict(x)
+            r2_all = r2_score(y, prediction)
+            
+            # Find the robust slope of actual
+            result_actual = mk.original_test(y, alpha=0.05)
+            p_actual = result_actual.p
+            s_actual = result_actual.slope
+            i_actual = result_actual.intercept
+            
+            #calculate slope of predicted variable with all params
+            result_prediction = mk.original_test(prediction, alpha=0.05)
+            p_prediction = result_prediction.p
+            s_prediction = result_prediction.slope
+            i_prediction = result_prediction.intercept
         
-        # create tidy df with all stats
-        # fi['phenometric'] = 'vPOS'
-        fi['slope_actual'] = s_actual
-        fi['slope_modelled'] = s_prediction
-        fi['p_actual'] = p_actual
-        fi['p_modelled'] = p_prediction
-        fi['i_actual'] = i_actual
-        fi['i_modelled'] = i_prediction
-        fi['r2'] = r2_all
+            #get the PLS coefficients
+            fi = pd.Series(dict(zip(list(x.columns), list(lr.coef_.reshape(len(x.columns)))))).to_frame()
+            fi = fi.rename({0:'PLS_coefficent'},axis=1)
+            fi = fi.reset_index().rename({'index':'feature'},axis=1).set_index('feature')
+            
+            # create tidy df with all stats
+            # fi['phenometric'] = 'vPOS'
+            fi['slope_actual'] = s_actual
+            fi['slope_modelled'] = s_prediction
+            fi['p_actual'] = p_actual
+            fi['p_modelled'] = p_prediction
+            fi['i_actual'] = i_actual
+            fi['i_modelled'] = i_prediction
+            fi['r2'] = r2_all
     
-        fi = fi.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon])
+            fi = fi.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon])
     
     return fi
+
+
+
 
 
 # @dask.delayed
