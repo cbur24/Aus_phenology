@@ -15,13 +15,19 @@ import xarray as xr
 import pandas as pd
 import pingouin as pg
 from scipy import stats
-import pymannkendall as mk
 from datetime import datetime
 from collections import namedtuple
 from odc.geo.xr import assign_crs
+
 from sklearn.metrics import r2_score
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.cross_decomposition import PLSRegression
+
+from tigramite import data_processing as pp
+from tigramite.pcmci import PCMCI
+from tigramite.independence_tests.robust_parcorr import RobustParCorr
+
+import pymannkendall as mk
 from pymannkendall.pymannkendall import __preprocessing, __missing_values_analysis, __mk_score, __variance_s, __z_score, __p_value, sens_slope
 
 import dask
@@ -449,7 +455,7 @@ def regression_attribution(
     model_type='PLS',
     pheno_var='vPOS',
     rolling=5,
-    modelling_vars=['co2','srad', 'rain','tavg', 'vpd']
+    modelling_vars=['srad','co2','rain','tavg','vpd']
 ):
     """
     Develop a partial least squares regression model or
@@ -475,32 +481,37 @@ def regression_attribution(
         lon = pheno.longitude.item()
 
         if pheno_var=='vPOS':
-            # find average time for POS - just use a random year
-            mean_pos = pd.Timestamp(datetime.strptime(f'{2000} {int(pheno_df.POS.mean())}', '%Y %j'))
         
-            #subtract 2 months to find the month-range for summarising climate
-            months_before = mean_pos - pd.DateOffset(months=1)
-            m_r = months_before.month, mean_pos.month
+            # Summarise climate dataover months around POS
+            peaks = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
+                     for y,doy in zip(pheno_df.POS_year, pheno_df.POS)]
         
-            #now we meed to index the covariable data by the range of months
-            c = X.sel(time=months_filter(X.time.dt.month, m_r[0], m_r[-1]))
-            
-            #calculate annual climate summary stats
-            r=c['rain']
-            r=r.groupby('time.year').sum()
-            c = c[[x for x in modelling_vars if x != 'rain']]
-            c = c.groupby('time.year').mean()
-            c = c.sel(year=pheno_df['POS_year'].values)
-            c['rain'] = r.sel(year=pheno_df['POS_year'].values)
-            c = c.drop_vars('spatial_ref')
+            #iterate through each POS and summarise climate data.
+            # Use peak-of-year for labelling coordinates
+            clim=[]
+            for p,y in zip(peaks, pheno_df.POS_year):
+                #subtract months to find the month-range
+                b = p - pd.DateOffset(months=1)
+                s,e = b.strftime('%Y-%m'), p.strftime('%Y-%m')
+                c = X.sel(time=slice(s,e)) #select months before peak
+                r = c['rain']
+                r = r.sum('time')
+                c = c[[x for x in modelling_vars if x != 'rain']]
+                c = c.mean('time')
+                c['rain'] = r
+                c = c.drop_vars('spatial_ref')
+                c = c.assign_coords(year=y)
+                clim.append(c)
 
         if pheno_var == 'IOS':
             # Summarise climate data over length of season for IOS
-            start = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j')) for y,doy in zip(pheno_df.SOS_year, pheno_df.SOS)]
-            end = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j')) for y,doy in zip(pheno_df.EOS_year, pheno_df.EOS)]
+            start = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
+                     for y,doy in zip(pheno_df.SOS_year, pheno_df.SOS)]
+            end = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
+                   for y,doy in zip(pheno_df.EOS_year, pheno_df.EOS)]
 
-            #iterate through each season and summarise climate data
-            # using peak-of-year for labelling coordinates
+            #iterate through each season and summarise climate data.
+            # Use peak-of-year for labelling coordinates
             clim=[]
             for s,e,p in zip(start, end, pheno_df.POS_year):
                 c = X.sel(time=slice(s,e)) #select each season
@@ -513,8 +524,8 @@ def regression_attribution(
                 c = c.assign_coords(year=p)
                 clim.append(c)
 
-            #join back into a time series xarray
-            c = xr.concat(clim, dim='year')
+        #join back into a time series xarray
+        c = xr.concat(clim, dim='year')
         
         # index of our metric with the years
         pheno_df[pheno_var].index = pheno_df['POS_year'].values
@@ -527,12 +538,15 @@ def regression_attribution(
         c[pheno_var] = pheno_variable
         
         #--------------- modelling---------------------------------------------------
-        # fit PLS on rolling annuals to remove some of the IAV (only interested in trends)
+        # fit rolling annuals to remove some of the IAV (only interested in trends)
         df = c.rolling(year=rolling, min_periods=rolling).mean().to_dataframe().dropna()
-        
+
         #fit a model with all vars
         x = df[modelling_vars]
         y = df[pheno_var]        
+
+        # print(x)
+        # print(y)
         
         if model_type=='ML':
             #fit a RF model with all vars
@@ -585,10 +599,103 @@ def regression_attribution(
             fi['r2'] = r2_all
     
             fi = fi.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon])
+
+        if model_type=='PCMCI':
+            # for PCMCI we need the whole dataframe with pheno_var.
+            # Ensure pheno_var is the first column in the dataframe
+            df = df[[pheno_var] + modelling_vars]
+            
+            # Initialize dataframe object, specify time axis and variable names
+            dataframe = pp.DataFrame(df.values, 
+                                     datatime=df.index, 
+                                     var_names=df.columns)
+            
+            # Make solar radiation have no parents.
+            idx_srad = df.columns.get_loc("srad")
+            tau_max=0
+            T, N = df.values.shape
+            link_assumptions_with_absent_links= {idx_srad:{(i, -tau):'' for i in range(N) for tau in range(0, tau_max+1) if not (i==idx_srad and tau==0)}}
+            link_assumptions =  PCMCI.build_link_assumptions(link_assumptions_with_absent_links,
+                                               n_component_time_series=N,
+                                               tau_max=tau_max,
+                                               tau_min=0)
+            #initiate PCMCI
+            pcmci = PCMCI(
+                dataframe=dataframe, 
+                cond_ind_test=RobustParCorr(),
+                verbosity=0)
+            
+            #Run PCMCI Plus
+            pcmci.verbosity = 0
+            results = pcmci.run_pcmciplus(tau_max=tau_max, pc_alpha=0.05,
+                                link_assumptions=link_assumptions)
+
+            ## because 'pheno_var' is the first column in the dataframe, if we want to extract
+            # the MCI values for vPOS we index for the first array in val_matrix
+            fi = pd.DataFrame(results['val_matrix'][0]).rename({0:'PCMCI'}, axis=1).reset_index(drop=True).set_index(df.columns)
+            fi['p_values'] = pd.DataFrame(results['p_matrix'][0]).rename({0:'p_values'}, axis=1).reset_index(drop=True).set_index(df.columns)
+            fi = fi.reset_index().rename({'index':'feature'},axis=1).set_index('feature').drop('vPOS')
+            
+            fi = fi.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon])
+
+        if model_type=='delta_slope':
+            lr = PLSRegression().fit(x, y)
+            prediction = lr.predict(x)
+            r2_all = r2_score(y, prediction)
     
+            # Find the robust slope of actual
+            result_actual = mk.original_test(y, alpha=0.05) #
+            p_actual = result_actual.p
+            s_actual = result_actual.slope
+            i_actual = result_actual.intercept
+            
+            #calculate slope of predicted variable with all params
+            result_prediction = mk.original_test(prediction, alpha=0.05) #
+            p_prediction = result_prediction.p
+            s_prediction = result_prediction.slope
+            i_prediction = result_prediction.intercept
+    
+            # now fit a model without a given variable
+            # and calculate the slope of the phenometric
+            r_delta={}
+            s_delta={}
+            for v in modelling_vars:
+                #set variable of interest as a constant value 
+                constant = x[v].iloc[0:1].mean() #average of first 5 years
+                xx = x.drop(v, axis=1)
+                xx[v] = constant
+            
+                #model and determine slope
+                lrr = PLSRegression().fit(xx, y)
+                pred = lrr.predict(xx)
+                r2 = r2_score(y, pred)
+                
+                result_p = mk.original_test(pred, alpha=0.1)
+                s_p = result_p.slope
+    
+                #determine the eucliden distance between
+                #modelled slope and actual slope (and r2)
+                s_delta[v] = math.dist((s_prediction,), (s_p,))
+                r_delta[v] = math.dist((r2_all,), (r2,))
+    
+            #determine most important feature
+            s_delta = pd.Series(s_delta)
+            r_delta = pd.Series(r_delta)
+            fi = pd.concat([s_delta, r_delta], axis=1).rename({0:'delta_slope', 1:'delta_r2'}, axis=1)
+            # fi = fi.loc[[fi['delta_slope'].idxmax()]]
+            fi = fi.reset_index().rename({'index':'feature'},axis=1).set_index('feature')
+    
+            #create tidy df
+            fi['slope_actual'] = s_actual
+            fi['slope_modelled'] = s_prediction
+            fi['p_actual'] = p_actual
+            fi['p_modelled'] = p_prediction
+            fi['i_actual'] = i_actual
+            fi['i_modelled'] = i_prediction
+            fi['r2'] = r2_all
+            fi = fi.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon])
+            
     return fi
-
-
 
 
 
