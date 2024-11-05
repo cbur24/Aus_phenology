@@ -18,6 +18,7 @@ from scipy import stats
 from datetime import datetime
 from collections import namedtuple
 from odc.geo.xr import assign_crs
+from odc.algo._percentile import xr_quantile
 
 from sklearn.metrics import r2_score
 from sklearn.ensemble import RandomForestRegressor
@@ -32,10 +33,14 @@ from pymannkendall.pymannkendall import __preprocessing, __missing_values_analys
 
 import dask
 
+
+def months_filter(month, start, end):
+    return (month >= start) & (month <= end)
+
 def _preprocess(d, dd):
     """
     d = ndvi data
-    dd = covariables for PLS regression modelling.
+    dd = covariables for regression modelling.
     
     """
     ### --------Handle NaNs---------
@@ -220,6 +225,9 @@ def xr_phenometrics(da,
         * ``'IOS'``: Integral of season (in value units)
         * ``'ROG'``: Rate of greening (value units per day)
         * ``'ROS'``: Rate of senescence (value units per day)
+        * ``'EPE'``: Ecosystem photsynthetic efficiency (IOS/vPOS)
+        * ``'LOS*vPOS'```: Product of LOS times vPOS, approximates IOS
+        * ``'IOS/(LOS*vPOS)'``: Ratio of IOS to the product of LOS*vPOS
     
     returns:
     --------
@@ -305,7 +313,14 @@ def xr_phenometrics(da,
     
         # Rate of growth and sensecing (NDVI per day)
         vars['ROG'] = (vars['vPOS'] - vars['vSOS']) / ((pd.to_datetime(pos.values) - pd.to_datetime(sos.values)).days)
-        vars['ROS'] = (vars['vEOS'] - vars['vPOS']) / ((pd.to_datetime(eos.values) - pd.to_datetime(pos.values)).days) 
+        vars['ROS'] = (vars['vEOS'] - vars['vPOS']) / ((pd.to_datetime(eos.values) - pd.to_datetime(pos.values)).days)
+
+        #----some higher order stats------
+        # Multiple of LOS*vPOS (estimates overall productivity)
+        vars['LOS*vPOS'] = vars['LOS'] * vars['vPOS']
+
+        # Ratio of IOS to the LOS*vPOS
+        vars['IOS:(LOS*vPOS)'] = vars['IOS'] / vars['LOS*vPOS']
         
         pheno[idx] = vars
 
@@ -325,7 +340,7 @@ def xr_phenometrics(da,
 def mk_with_slopes(x_old, alpha = 0.05):
     """
     This function checks the Mann-Kendall (MK) test (Mann 1945, Kendall 1975, Gilbert 1987).
-    This was modified from pymannkendall library to return fewer statistics which makes
+    This was modified from the "pymannkendall" library to return fewer statistics which makes
     it a little more robust.
     
     Input:
@@ -393,59 +408,69 @@ def _mean(ds):
     n_seasons = len(ds.index)
     
     #first check if its nodata and do a quick mean
-    if ds.vPOS.isel(index=0).values.item() == -99.0:
+    # if ds.vPOS.isel(index=0).values.item() == -99.0:
+    if np.isnan(ds.vPOS.isel(index=0).values.item()):
         dd = ds.mean('index')
         
-    else: # otherwise do the (very) slow median
-        dd = ds.median('index')
+    else: # use Kirill's much faster quantile function
+        ds = ds.transpose('index', 'latitude', 'longitude')
+        dd = xr_quantile(ds, quantiles=[0.5], nodata=np.nan)
+        dd = dd.sel(quantile=0.5).drop_vars('quantile')
 
     # add new variable with number of seasons
     dd['n_seasons'] = n_seasons
-    dd['n_seasons'] = dd['n_seasons'].expand_dims(latitude=dd.latitude,
-                                                  longitude=dd.longitude
-                                                 )
+    dd['n_seasons'] = dd['n_seasons'].expand_dims(
+        latitude=dd.latitude,
+        longitude=dd.longitude
+    )
     return dd
 
+
 @dask.delayed
-def xr_parcorr(
+def IOS_analysis(
     pheno, #pheno data
     template,
     pheno_var='IOS',
-    rolling=5,
-    modelling_vars=['vPOS','vSOS','vEOS','SOS','POS','EOS','LOS']
+    rolling=1,
+    modelling_vars=['vPOS','LOS']
 ):  
     """
-    Find the partial correlation coefficients between a phenology metric (IOS)
-    and the other phenometrics.
+    Find the partial correlation coefficients between IOS
+    and vPOS and LOS (because LOS*vPOS ~ IOS). Additionally,
+    find the slope and correlation between IOS and LOS*vPOS 
     """
     
     #check if this is a no-data pixel
-    if pheno.vPOS.isel(index=0).values.item() == -99.0:
+    if np.isnan(pheno.vPOS.isel(index=0).values.item()):
         p_corr = template.copy() #use our template    
         p_corr['latitude'] = [pheno.latitude.values.item()] #update coords
         p_corr['longitude'] = [pheno.longitude.values.item()]
     
     else:
-        #rolling 5yr means to squeeze out IAV
-        df = pheno.squeeze().to_dataframe().drop(['latitude','longitude'],axis=1).rolling(rolling).mean().dropna()
+        #rolling means to squeeze out IAV (leaving this here as configurable but smoothing data anymore)
+        df = pheno.squeeze().to_dataframe().drop(['latitude','longitude'], axis=1).rolling(rolling).mean().dropna()
 
-        # this code for resampling time rather than rolling means
-        # df['time'] = [datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j') for y,doy in zip(df['POS_year'], df['POS'])]
-        # df = df.set_index('time').resample('3YE').mean()
-        
+        #--------------partial correlation between vPOS, IOS, and LOS -----
         p_corr = pg.pairwise_corr(df,
-                     columns=[[pheno_var], modelling_vars]) 
-        
+                         columns=[['IOS'], ['vPOS','LOS']]) 
+            
         p_corr = p_corr[['Y','r']].set_index('Y').transpose().reset_index(drop=True)
         
+        # --------Slope and pearson R between IOS and LOS*vPOS ---------
+        result = stats.linregress(df['LOS*vPOS'], df['IOS'])
+        slope = result.slope
+        pearson_r = result.rvalue
+        p_corr['slope_IOS_vs_LOS*vPOS'] = slope
+        p_corr['pearson_r_IOS_vs_LOS*vPOS'] = pearson_r
+
+        # tidy up
         lat = pheno.latitude.item()
         lon = pheno.longitude.item()
         p_corr = p_corr.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon]).drop_vars('index')
-    
+        p_corr = p_corr.rename({'vPOS':'vPOS_parcorr', 'LOS':'LOS_parcorr'})
+
     return p_corr
 
-def months_filter(month, start, end):
-    return (month >= start) & (month <= end)
 
 @dask.delayed
 def regression_attribution(
@@ -458,9 +483,8 @@ def regression_attribution(
     modelling_vars=['srad','co2','rain','tavg','vpd']
 ):
     """
-    Develop a partial least squares regression model or
-    ML model between a phenological variable and modelling
-    covariables such as climate data. 
+    Develop regression models or between a phenological
+    variable and modelling covariables such as climate data. 
 
     returns:
     --------
@@ -470,7 +494,7 @@ def regression_attribution(
     
     #-------Get phenometrics and covariables in the same frame-------
     #check if this is a no-data pixel
-    if pheno.vPOS.isel(index=0).values.item() == -99.0:
+    if np.isnan(pheno.vPOS.isel(index=0).values.item()):
         fi = template.copy() #use our template    
         fi['latitude'] = [pheno.latitude.values.item()] #update coords
         fi['longitude'] = [pheno.longitude.values.item()]
@@ -481,48 +505,33 @@ def regression_attribution(
         lon = pheno.longitude.item()
 
         if pheno_var=='vPOS':
-        
-            # Summarise climate dataover months around POS
-            peaks = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
+
+            # Summarise climate data over greening cycle SOS-POS
+            start = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
+                     for y,doy in zip(pheno_df.SOS_year, pheno_df.SOS)]
+            end = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
                      for y,doy in zip(pheno_df.POS_year, pheno_df.POS)]
-        
-            #iterate through each POS and summarise climate data.
-            # Use peak-of-year for labelling coordinates
-            clim=[]
-            for p,y in zip(peaks, pheno_df.POS_year):
-                #subtract months to find the month-range
-                b = p - pd.DateOffset(months=1)
-                s,e = b.strftime('%Y-%m'), p.strftime('%Y-%m')
-                c = X.sel(time=slice(s,e)) #select months before peak
-                r = c['rain']
-                r = r.sum('time')
-                c = c[[x for x in modelling_vars if x != 'rain']]
-                c = c.mean('time')
-                c['rain'] = r
-                c = c.drop_vars('spatial_ref')
-                c = c.assign_coords(year=y)
-                clim.append(c)
 
         if pheno_var == 'IOS':
-            # Summarise climate data over length of season for IOS
+            # Summarise climate data over length of season for IOS (SOS to EOS)
             start = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
                      for y,doy in zip(pheno_df.SOS_year, pheno_df.SOS)]
             end = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
                    for y,doy in zip(pheno_df.EOS_year, pheno_df.EOS)]
 
-            #iterate through each season and summarise climate data.
-            # Use peak-of-year for labelling coordinates
-            clim=[]
-            for s,e,p in zip(start, end, pheno_df.POS_year):
-                c = X.sel(time=slice(s,e)) #select each season
-                r = c['rain']
-                r = r.sum('time')
-                c = c[[x for x in modelling_vars if x != 'rain']]
-                c = c.mean('time')
-                c['rain'] = r
-                c = c.drop_vars('spatial_ref')
-                c = c.assign_coords(year=p)
-                clim.append(c)
+        #iterate through each season and summarise climate data.
+        # Use peak-of-year for labelling coordinates
+        clim=[]
+        for s,e,p in zip(start, end, pheno_df.POS_year):
+            c = X.sel(time=slice(s,e)) #select each season
+            r = c['rain']
+            r = r.sum('time')
+            c = c[[x for x in modelling_vars if x != 'rain']]
+            c = c.mean('time')
+            c['rain'] = r
+            c = c.drop_vars('spatial_ref')
+            c = c.assign_coords(year=p)
+            clim.append(c)
 
         #join back into a time series xarray
         c = xr.concat(clim, dim='year')
@@ -610,15 +619,15 @@ def regression_attribution(
                                      datatime=df.index, 
                                      var_names=df.columns)
             
-            # Make solar radiation have no parents.
-            idx_srad = df.columns.get_loc("srad")
-            tau_max=0
-            T, N = df.values.shape
-            link_assumptions_with_absent_links= {idx_srad:{(i, -tau):'' for i in range(N) for tau in range(0, tau_max+1) if not (i==idx_srad and tau==0)}}
-            link_assumptions =  PCMCI.build_link_assumptions(link_assumptions_with_absent_links,
-                                               n_component_time_series=N,
-                                               tau_max=tau_max,
-                                               tau_min=0)
+            # # Make solar radiation have no parents.
+            # idx_srad = df.columns.get_loc("srad")
+            # tau_max=0
+            # T, N = df.values.shape
+            # link_assumptions_with_absent_links= {idx_srad:{(i, -tau):'' for i in range(N) for tau in range(0, tau_max+1) if not (i==idx_srad and tau==0)}}
+            # link_assumptions =  PCMCI.build_link_assumptions(link_assumptions_with_absent_links,
+            #                                    n_component_time_series=N,
+            #                                    tau_max=tau_max,
+            #                                    tau_min=0)
             #initiate PCMCI
             pcmci = PCMCI(
                 dataframe=dataframe, 
@@ -627,15 +636,17 @@ def regression_attribution(
             
             #Run PCMCI Plus
             pcmci.verbosity = 0
-            results = pcmci.run_pcmciplus(tau_max=tau_max, pc_alpha=0.05,
-                                link_assumptions=link_assumptions)
+            results = pcmci.run_pcmciplus(tau_max=0, pc_alpha=0.05,
+                                # link_assumptions=link_assumptions
+                                         )
 
             ## because 'pheno_var' is the first column in the dataframe, if we want to extract
             # the MCI values for vPOS we index for the first array in val_matrix
             fi = pd.DataFrame(results['val_matrix'][0]).rename({0:'PCMCI'}, axis=1).reset_index(drop=True).set_index(df.columns)
             fi['p_values'] = pd.DataFrame(results['p_matrix'][0]).rename({0:'p_values'}, axis=1).reset_index(drop=True).set_index(df.columns)
             fi = fi.reset_index().rename({'index':'feature'},axis=1).set_index('feature').drop('vPOS')
-            
+
+            #tidy up
             fi = fi.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon])
 
         if model_type=='delta_slope':
@@ -698,6 +709,31 @@ def regression_attribution(
     return fi
 
 
+
+# this code for resampling time rather than rolling means
+# df['time'] = [datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j') for y,doy in zip(df['POS_year'], df['POS'])]
+# df = df.set_index('time').resample('3YE').mean()
+
+# # Summarise climate data over SOS to the POS
+        # peaks = [pd.Timestamp(datetime.strptime(f'{int(y)} {int(doy)}', '%Y %j'))
+        #          for y,doy in zip(pheno_df.POS_year, pheno_df.POS)]
+    
+        # #iterate through each POS and summarise climate data.
+        # # Use peak-of-year for labelling coordinates
+        # clim=[]
+        # for p,y in zip(peaks, pheno_df.POS_year):
+        #     #subtract months to find the month-range
+        #     b = p - pd.DateOffset(months=1)
+        #     s,e = b.strftime('%Y-%m'), p.strftime('%Y-%m')
+        #     c = X.sel(time=slice(s,e)) #select months before peak
+        #     r = c['rain']
+        #     r = r.sum('time')
+        #     c = c[[x for x in modelling_vars if x != 'rain']]
+        #     c = c.mean('time')
+        #     c['rain'] = r
+        #     c = c.drop_vars('spatial_ref')
+        #     c = c.assign_coords(year=y)
+        #     clim.append(c)
 
 # @dask.delayed
 # def pls_phenology_modelling(data, #NDVI data
