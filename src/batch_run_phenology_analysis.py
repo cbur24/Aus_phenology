@@ -48,12 +48,15 @@ def phenometrics_etal(
     #open data
     d_path = f'/g/data/os22/chad_tmp/Aus_phenology/data/tiled_data/NDVI_{n}.nc'
     dd_path = f'/g/data/os22/chad_tmp/Aus_phenology/data/tiled_data/COVARS_{n}.nc'
+    ss_path = f'/g/data/xc0/project/AusEFlux/data/ndvi_of_baresoil_5km.nc'
     d = assign_crs(xr.open_dataarray(d_path), crs='epsg:4326')
     dd = assign_crs(xr.open_dataset(dd_path), crs='epsg:4326')
+    ss = assign_crs(xr.open_dataarray(ss_path), crs='epsg:4326')
+    ss.name = 'NDVI'
     
     # transform the data and return all the objects we need. This code smooth and
     # interpolates the data, then stacks the pixels into a spatial index
-    d, dd, Y, idx_all_nan, nan_mask, shape = _preprocess(d, dd)
+    d, dd, ss, Y, idx_all_nan, nan_mask, shape = _preprocess(d, dd, ss)
     
     # Open templates array which we'll use whenever we encounter an all-NaN index
     # This speeds up the analysis by not running pixels that are empty.
@@ -61,7 +64,7 @@ def phenometrics_etal(
     # bb = xr.full_like(results[0], fill_value=np.nan, dtype='float32')
     template_path='/g/data/os22/chad_tmp/Aus_phenology/data/templates/'
     phen_template = xr.open_dataset(f'{template_path}template.nc')
-    ios_template = xr.open_dataset(f'{template_path}template_IOS.nc')
+    ios_template = xr.open_dataset(f'{template_path}template_IOC_parcorr.nc')
 
     #now we start the real proceessing
     results=[]
@@ -84,7 +87,11 @@ def phenometrics_etal(
                               distance=90,
                               prominence='auto',
                               plateau_size=10,
-                              amplitude=0.20
+                              amplitude=0.20,
+                              soil_signal = ss.sel(
+                                 latitude=data.latitude.values.item(),
+                                 longitude=data.longitude.values.item()
+                                    )
                              )
     
         #append results, either data or all-zeros
@@ -115,7 +122,7 @@ def phenometrics_etal(
     else:
     
         trend_vars = ['POS','vPOS','TOS','vTOS','AOS','SOS','vSOS','EOS',
-                    'vEOS','LOS','IOS','ROG','ROS','LOS*vPOS','IOS:(LOS*vPOS)']
+                    'vEOS','LOS','IOS','IOC','ROG','ROS','LOS*vPOS','IOC:(LOS*vPOS)']
         p_trends = [phenology_trends(x, trend_vars) for x in results]
         p_trends = dask.compute(p_trends)[0]
         p_trends = xr.combine_by_coords(p_trends)
@@ -140,32 +147,32 @@ def phenometrics_etal(
         p_parcorr = xr.combine_by_coords(p_parcorr).astype('float32')
         p_parcorr.to_netcdf(f'{results_path}IOS_analysis_perpixel_{n}.nc')
     
-    # -----regression attribution iterate-------------------------------
-    for model_type in ['delta_slope', 'PLS', 'PCMCI', 'ML']:
+    # # -----regression attribution iterate-------------------------------
+    # for model_type in ['delta_slope', 'PLS', 'PCMCI', 'ML']:
         
-        if os.path.exists(f'{results_path}attribution_{regress_var}_{model_type}_perpixel_{n}.nc'):
-            pass
-        else:
+    #     if os.path.exists(f'{results_path}attribution_{regress_var}_{model_type}_perpixel_{n}.nc'):
+    #         pass
+    #     else:
             
-            regress_template = xr.open_dataset(f'{template_path}template_{model_type}.nc').sel(feature=modelling_vars)
+    #         regress_template = xr.open_dataset(f'{template_path}template_{model_type}.nc').sel(feature=modelling_vars)
         
-            p_attribution = []    
-            for pheno in results:
-                lat = pheno.latitude.item()
-                lon = pheno.longitude.item()
+    #         p_attribution = []    
+    #         for pheno in results:
+    #             lat = pheno.latitude.item()
+    #             lon = pheno.longitude.item()
                 
-                fi = regression_attribution(pheno,
-                                   X=dd.sel(latitude=lat, longitude=lon),
-                                   template=regress_template,
-                                   model_type=model_type,
-                                   pheno_var=regress_var,
-                                   modelling_vars=modelling_vars,
-                                  )
-                p_attribution.append(fi)
+    #             fi = regression_attribution(pheno,
+    #                                X=dd.sel(latitude=lat, longitude=lon),
+    #                                template=regress_template,
+    #                                model_type=model_type,
+    #                                pheno_var=regress_var,
+    #                                modelling_vars=modelling_vars,
+    #                               )
+    #             p_attribution.append(fi)
             
-            p_attribution = dask.compute(p_attribution)[0]
-            p_attribution = xr.combine_by_coords(p_attribution).astype('float32')
-            p_attribution.to_netcdf(f'{results_path}attribution_{regress_var}_{model_type}_perpixel_{n}.nc')
+    #         p_attribution = dask.compute(p_attribution)[0]
+    #         p_attribution = xr.combine_by_coords(p_attribution).astype('float32')
+    #         p_attribution.to_netcdf(f'{results_path}attribution_{regress_var}_{model_type}_perpixel_{n}.nc')
 
 #run function
 if __name__ == '__main__':

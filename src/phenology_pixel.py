@@ -37,29 +37,32 @@ import dask
 def months_filter(month, start, end):
     return (month >= start) & (month <= end)
 
-def _preprocess(d, dd):
+def _preprocess(d, dd, ss):
     """
     d = ndvi data
     dd = covariables for regression modelling.
+    ss = soil signal xarray dataarray
     
     """
     ### --------Handle NaNs---------
     # Due to issues with xarray quadratic interpolation, we need to remove
     # every NaN or else the daily interpolation function will fail
     
-    ##remove last ~6 timesteps that are all-NaN (from S-G smoothing).
+    ## remove last ~6 timesteps that are all-NaN (from S-G smoothing).
     times_to_keep = d.mean(['latitude','longitude']).dropna(dim='time',how='any').time
     d = d.sel(time=times_to_keep)
     
-    #Find where NaNs are >10 % of data, will use this mask to remove pixels later.
-    #and include any NaNs in the climate data.
+    # Find where NaNs are >10 % of data, will use this mask to remove pixels later.
+    # and include any NaNs in the climate data.
     ndvi_nan_mask = np.isnan(d).sum('time') >= len(d.time) / 10
     clim_nan_mask = dd[['rain','vpd','tavg','srad']].to_array().isnull().any('variable')
     clim_nan_mask = (clim_nan_mask.sum('time')>0)
-    nan_mask = (clim_nan_mask | ndvi_nan_mask)
+    soil_nan_mask = np.isnan(ss)
+    nan_mask = (clim_nan_mask | ndvi_nan_mask | soil_nan_mask)
 
     d = d.where(~nan_mask)
     dd = dd.where(~nan_mask)
+    ss = ss.where(~nan_mask)
     
     #fill the mostly all NaN slices with a fill value
     d = xr.where(nan_mask, -99, d)
@@ -81,7 +84,7 @@ def _preprocess(d, dd):
     # This is where the nan_mask we created earlier = True
     idx_all_nan = np.where(nan_mask.stack(spatial=('latitude', 'longitude'))==True)[0]
 
-    return d, dd, Y, idx_all_nan, nan_mask, shape
+    return d, dd, ss, Y, idx_all_nan, nan_mask, shape
 
 def _extract_peaks_troughs(da,
                       rolling=90,
@@ -197,7 +200,8 @@ def xr_phenometrics(da,
              prominence='auto',
              plateau_size=10,
              amplitude=0.20,  
-             verbose=True
+             verbose=True,
+             soil_signal=0.141
             ):
     """
     Calculate statistics that describe the phenology cycle of
@@ -222,14 +226,14 @@ def xr_phenometrics(da,
         * ``'vTOS'``: Value at the beginning of cycle (left of peak)
         * ``'LOS'``: Length of season (DOY)
         * ``'AOS'``: Amplitude of season (in value units)
-        * ``'IOS'``: Integral of season (in value units)
+        * ``'IOS'``: Integral of season (in value units, minus soil signal)
+        * ``'IOC'``: Integral of cycle (in value units, minus soil signal)
         * ``'ROG'``: Rate of greening (value units per day)
         * ``'ROS'``: Rate of senescence (value units per day)
-        * ``'EPE'``: Ecosystem photsynthetic efficiency (IOS/vPOS)
         * ``'LOS*vPOS'```: Product of LOS times vPOS, approximates IOS
         * ``'IOS/(LOS*vPOS)'``: Ratio of IOS to the product of LOS*vPOS
     
-    returns:
+    Returns:
     --------
     Xarray dataset with phenometrics. Xarray is a 1D array.
     
@@ -254,6 +258,12 @@ def xr_phenometrics(da,
         
     # Store phenology stats
     pheno = {}
+
+    if isinstance(soil_signal, float):
+        pass
+
+    if isinstance(soil_signal, xr.DataArray):
+       soil_signal = soil_signal.values.item()
     
     peaks_only = p_t.peaks.dropna()
     for peaks, idx in zip(peaks_only.index, range(0,len(peaks_only))):
@@ -308,8 +318,14 @@ def xr_phenometrics(da,
     
         #Integral of season
         ios = ndvi_cycle.sel(time=slice(sos, eos))
+        ios = ios-soil_signal
         ios = ios.integrate(coord='time', datetime_unit='D')
         vars['IOS'] = ios
+
+        #Integral of cycle
+        ioc = ndvi_cycle-soil_signal
+        ioc = ioc.integrate(coord='time', datetime_unit='D')
+        vars['IOC'] = ioc
     
         # Rate of growth and sensecing (NDVI per day)
         vars['ROG'] = (vars['vPOS'] - vars['vSOS']) / ((pd.to_datetime(pos.values) - pd.to_datetime(sos.values)).days)
@@ -320,7 +336,7 @@ def xr_phenometrics(da,
         vars['LOS*vPOS'] = vars['LOS'] * vars['vPOS']
 
         # Ratio of IOS to the LOS*vPOS
-        vars['IOS:(LOS*vPOS)'] = vars['IOS'] / vars['LOS*vPOS']
+        vars['IOC:(LOS*vPOS)'] = vars['IOC'] / vars['LOS*vPOS']
         
         pheno[idx] = vars
 
@@ -405,14 +421,23 @@ def phenology_trends(ds, vars):
 @dask.delayed
 def _mean(ds):
     # count number of seasons
+    #and how many years was this over?
     n_seasons = len(ds.index)
+    
+    a = ds.POS_year.isel(index=0).values.item()
+    b = ds.POS_year.isel(index=-1).values.item()
+    
+    if np.isnan(a):
+        n_years=39
+    else:
+        n_years = len([i for i in range(int(a),int(b)+1)])
     
     #first check if its nodata and do a quick mean
     # if ds.vPOS.isel(index=0).values.item() == -99.0:
     if np.isnan(ds.vPOS.isel(index=0).values.item()):
         dd = ds.mean('index')
         
-    else: # use Kirill's much faster quantile function
+    else: # use Kirill's much much faster quantile function
         ds = ds.transpose('index', 'latitude', 'longitude')
         dd = xr_quantile(ds, quantiles=[0.5], nodata=np.nan)
         dd = dd.sel(quantile=0.5).drop_vars('quantile')
@@ -423,20 +448,25 @@ def _mean(ds):
         latitude=dd.latitude,
         longitude=dd.longitude
     )
+    
+    dd['n_years'] = n_years
+    dd['n_years'] = dd['n_years'].expand_dims(
+        latitude=dd.latitude,
+        longitude=dd.longitude
+    )
     return dd
-
 
 @dask.delayed
 def IOS_analysis(
     pheno, #pheno data
     template,
-    pheno_var='IOS',
+    pheno_var='IOC',
     rolling=1,
-    modelling_vars=['vPOS','LOS']
+    modelling_vars=['vPOS','vSOS','vEOS','vTOS','SOS','POS','EOS','LOS']
 ):  
     """
     Find the partial correlation coefficients between IOS
-    and vPOS and LOS (because LOS*vPOS ~ IOS). Additionally,
+    others seasonality metrics. Additionally,
     find the slope and correlation between IOS and LOS*vPOS 
     """
     
@@ -447,27 +477,27 @@ def IOS_analysis(
         p_corr['longitude'] = [pheno.longitude.values.item()]
     
     else:
-        #rolling means to squeeze out IAV (leaving this here as configurable but smoothing data anymore)
+        #rolling means to squeeze out IAV (leaving this here as configurable but not smoothing data anymore)
         df = pheno.squeeze().to_dataframe().drop(['latitude','longitude'], axis=1).rolling(rolling).mean().dropna()
 
-        #--------------partial correlation between vPOS, IOS, and LOS -----
+        #--------------partial correlation with IOC -----
         p_corr = pg.pairwise_corr(df,
-                         columns=[['IOS'], ['vPOS','LOS']]) 
+                         columns=[[pheno_var], modelling_vars]) 
             
         p_corr = p_corr[['Y','r']].set_index('Y').transpose().reset_index(drop=True)
         
-        # --------Slope and pearson R between IOS and LOS*vPOS ---------
-        result = stats.linregress(df['LOS*vPOS'], df['IOS'])
+        # --------Slope and pearson R between IOC and LOS*vPOS ---------
+        result = stats.linregress(df['LOS*vPOS'], df['IOC'])
         slope = result.slope
         pearson_r = result.rvalue
-        p_corr['slope_IOS_vs_LOS*vPOS'] = slope
-        p_corr['pearson_r_IOS_vs_LOS*vPOS'] = pearson_r
+        p_corr['slope_IOC_vs_LOS*vPOS'] = slope
+        p_corr['pearson_r_IOC_vs_LOS*vPOS'] = pearson_r
 
         # tidy up
         lat = pheno.latitude.item()
         lon = pheno.longitude.item()
         p_corr = p_corr.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon]).drop_vars('index')
-        p_corr = p_corr.rename({'vPOS':'vPOS_parcorr', 'LOS':'LOS_parcorr'})
+        # p_corr = p_corr.rename({'vPOS':'vPOS_parcorr', 'LOS':'LOS_parcorr'})
 
     return p_corr
 
