@@ -27,7 +27,7 @@ from _utils import round_coords
 ## varibles for script
 n_workers=102
 memory_limit='450GiB'
-
+integral_var = 'IOS'
 regress_var = 'vPOS'
 modelling_vars=['co2', 'srad', 'rain', 'tavg', 'vpd']
 results_path = '/g/data/os22/chad_tmp/Aus_phenology/results/combined_tiles/'
@@ -39,6 +39,7 @@ n = os.getenv('TILENAME')
 def phenometrics_etal(
     n,
     results_path,
+    integral_var,
     regress_var,
     template_path,
     modelling_vars,
@@ -64,7 +65,7 @@ def phenometrics_etal(
     # bb = xr.full_like(results[0], fill_value=np.nan, dtype='float32')
     template_path='/g/data/os22/chad_tmp/Aus_phenology/data/templates/'
     phen_template = xr.open_dataset(f'{template_path}template.nc')
-    ios_template = xr.open_dataset(f'{template_path}template_IOC_parcorr.nc')
+    ios_template = xr.open_dataset(f'{template_path}template_integral_parcorr.nc')
 
     #now we start the real proceessing
     results=[]
@@ -122,7 +123,7 @@ def phenometrics_etal(
     else:
     
         trend_vars = ['POS','vPOS','TOS','vTOS','AOS','SOS','vSOS','EOS',
-                    'vEOS','LOS','IOS','IOC','ROG','ROS','LOS*vPOS','IOC:(LOS*vPOS)']
+                    'vEOS','LOS','IOS','IOC','ROG','ROS','LOS*vPOS','IOS:(LOS*vPOS)']
         p_trends = [phenology_trends(x, trend_vars) for x in results]
         p_trends = dask.compute(p_trends)[0]
         p_trends = xr.combine_by_coords(p_trends)
@@ -135,17 +136,17 @@ def phenometrics_etal(
         p_trends.to_netcdf(f'{results_path}trends_phenology_perpixel_{n}.nc')
     
     # ----Partial correlation analysis etc. on IOS -----------------
-    if os.path.exists(f'{results_path}IOS_analysis_perpixel_{n}.nc'):
+    if os.path.exists(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc'):
         pass
     else:
         p_parcorr = []
         for pheno in results:            
-            corr = IOS_analysis(pheno, ios_template)
+            corr = IOS_analysis(pheno, ios_template, pheno_var=integral_var)
             p_parcorr.append(corr)
         
         p_parcorr = dask.compute(p_parcorr)[0]
         p_parcorr = xr.combine_by_coords(p_parcorr).astype('float32')
-        p_parcorr.to_netcdf(f'{results_path}IOS_analysis_perpixel_{n}.nc')
+        p_parcorr.to_netcdf(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc')
     
     # # -----regression attribution iterate-------------------------------
     # for model_type in ['delta_slope', 'PLS', 'PCMCI', 'ML']:
@@ -188,6 +189,7 @@ if __name__ == '__main__':
         n=n,
         results_path=results_path,
         template_path=template_path,
+        integral_var=integral_var,
         regress_var=regress_var,
         modelling_vars=modelling_vars,
     )

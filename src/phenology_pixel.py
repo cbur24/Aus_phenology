@@ -336,7 +336,7 @@ def xr_phenometrics(da,
         vars['LOS*vPOS'] = vars['LOS'] * vars['vPOS']
 
         # Ratio of IOS to the LOS*vPOS
-        vars['IOC:(LOS*vPOS)'] = vars['IOC'] / vars['LOS*vPOS']
+        vars['IOS:(LOS*vPOS)'] = vars['IOS'] / vars['LOS*vPOS']
         
         pheno[idx] = vars
 
@@ -460,14 +460,13 @@ def _mean(ds):
 def IOS_analysis(
     pheno, #pheno data
     template,
-    pheno_var='IOC',
+    pheno_var='IOS',
     rolling=1,
-    modelling_vars=['vPOS','vSOS','vEOS','vTOS','SOS','POS','EOS','LOS']
+    modelling_vars=['vPOS','vSOS','vEOS','SOS','POS','EOS','LOS']
 ):  
     """
     Find the partial correlation coefficients between IOS
-    others seasonality metrics. Additionally,
-    find the slope and correlation between IOS and LOS*vPOS 
+    others seasonality metrics. 
     """
     
     #check if this is a no-data pixel
@@ -487,17 +486,16 @@ def IOS_analysis(
         p_corr = p_corr[['Y','r']].set_index('Y').transpose().reset_index(drop=True)
         
         # --------Slope and pearson R between IOC and LOS*vPOS ---------
-        result = stats.linregress(df['LOS*vPOS'], df['IOC'])
-        slope = result.slope
-        pearson_r = result.rvalue
-        p_corr['slope_IOC_vs_LOS*vPOS'] = slope
-        p_corr['pearson_r_IOC_vs_LOS*vPOS'] = pearson_r
+        # result = stats.linregress(df['LOS*vPOS'], df[pheno_var])
+        # slope = result.slope
+        # pearson_r = result.rvalue
+        # p_corr[f'slope_{pheno_var}_vs_LOS*vPOS'] = slope
+        # p_corr[f'pearson_r_{pheno_var}_vs_LOS*vPOS'] = pearson_r
 
         # tidy up
         lat = pheno.latitude.item()
         lon = pheno.longitude.item()
         p_corr = p_corr.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon]).drop_vars('index')
-        # p_corr = p_corr.rename({'vPOS':'vPOS_parcorr', 'LOS':'LOS_parcorr'})
 
     return p_corr
 
