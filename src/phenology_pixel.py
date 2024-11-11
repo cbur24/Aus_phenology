@@ -225,6 +225,7 @@ def xr_phenometrics(da,
         * ``'TOS'``: DOY of the minimum at the beginning of cycle (left of peak)
         * ``'vTOS'``: Value at the beginning of cycle (left of peak)
         * ``'LOS'``: Length of season (DOY)
+        * ``'LOC'``: Length of cycle (trough to trough) (DOY)
         * ``'AOS'``: Amplitude of season (in value units)
         * ``'IOS'``: Integral of season (in value units, minus soil signal)
         * ``'IOC'``: Integral of cycle (in value units, minus soil signal)
@@ -315,6 +316,10 @@ def xr_phenometrics(da,
         # LOS
         los = (pd.to_datetime(eos.values) - pd.to_datetime(sos.values)).days
         vars['LOS'] = los
+
+        # LOC
+        loc = (end_time - start_time).days
+        vars['LOC'] = loc
     
         #Integral of season
         ios = ndvi_cycle.sel(time=slice(sos, eos))
@@ -332,11 +337,17 @@ def xr_phenometrics(da,
         vars['ROS'] = (vars['vEOS'] - vars['vPOS']) / ((pd.to_datetime(eos.values) - pd.to_datetime(pos.values)).days)
 
         #----some higher order stats------
-        # Multiple of LOS*vPOS (estimates overall productivity)
+        # Multiple of LOS*vPOS (estimates IOS)
         vars['LOS*vPOS'] = vars['LOS'] * vars['vPOS']
 
         # Ratio of IOS to the LOS*vPOS
         vars['IOS:(LOS*vPOS)'] = vars['IOS'] / vars['LOS*vPOS']
+
+        # Multiple of LOC*vPOS (estimates IOC)
+        vars['LOC*vPOS'] = vars['LOC'] * vars['vPOS']
+
+        # Ratio of IOS to the LOS*vPOS
+        vars['IOC:(LOC*vPOS)'] = vars['IOC'] / vars['LOC*vPOS']
         
         pheno[idx] = vars
 
@@ -462,18 +473,27 @@ def IOS_analysis(
     template,
     pheno_var='IOS',
     rolling=1,
-    modelling_vars=['vPOS','vSOS','vEOS','SOS','POS','EOS','LOS']
+    modelling_vars=['vPOS','vSOS','vEOS','SOS','POS','EOS']
 ):  
     """
-    Find the partial correlation coefficients between IOS
-    others seasonality metrics. 
+    Find the partial correlation coefficients between IOS(C) and
+    other seasonality metrics. 
     """
-    
+    if pheno_var=='IOS':
+        modelling_vars=modelling_vars+['LOS']
+
+    if pheno_var=='IOC':
+        modelling_vars=modelling_vars+['vTOS','LOC']
+        
     #check if this is a no-data pixel
     if np.isnan(pheno.vPOS.isel(index=0).values.item()):
         p_corr = template.copy() #use our template    
         p_corr['latitude'] = [pheno.latitude.values.item()] #update coords
         p_corr['longitude'] = [pheno.longitude.values.item()]
+        
+        if pheno_var=='IOC': #rename the template LOS to LOC
+            p_corr = p_corr.rename({'LOS':'LOC'})
+            p_corr['vTOS'] = p_corr['vPOS'] #add the extra variable 
     
     else:
         #rolling means to squeeze out IAV (leaving this here as configurable but not smoothing data anymore)

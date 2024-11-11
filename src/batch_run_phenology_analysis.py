@@ -27,7 +27,7 @@ from _utils import round_coords
 ## varibles for script
 n_workers=102
 memory_limit='450GiB'
-integral_var = 'IOS'
+integral_var = 'IOC'
 regress_var = 'vPOS'
 modelling_vars=['co2', 'srad', 'rain', 'tavg', 'vpd']
 results_path = '/g/data/os22/chad_tmp/Aus_phenology/results/combined_tiles/'
@@ -123,7 +123,8 @@ def phenometrics_etal(
     else:
     
         trend_vars = ['POS','vPOS','TOS','vTOS','AOS','SOS','vSOS','EOS',
-                    'vEOS','LOS','IOS','IOC','ROG','ROS','LOS*vPOS','IOS:(LOS*vPOS)']
+                      'vEOS','LOS','LOC', 'IOS','IOC','ROG','ROS',
+                      'LOS*vPOS','IOS:(LOS*vPOS)', 'LOC*vPOS','IOC:(LOC*vPOS)']
         p_trends = [phenology_trends(x, trend_vars) for x in results]
         p_trends = dask.compute(p_trends)[0]
         p_trends = xr.combine_by_coords(p_trends)
