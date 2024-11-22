@@ -432,7 +432,7 @@ def phenology_trends(ds, vars):
 @dask.delayed
 def _mean(ds):
     # count number of seasons
-    #and how many years was this over?
+    # and how many years was this over?
     n_seasons = len(ds.index)
     
     a = ds.POS_year.isel(index=0).values.item()

@@ -18,7 +18,7 @@ from odc.geo.xr import assign_crs
 
 import sys
 sys.path.append('/g/data/os22/chad_tmp/Aus_phenology/src')
-from phenology_pixel import _preprocess, xr_phenometrics, phenology_trends, _mean, regression_attribution, IOS_analysis
+from phenology_pixel_circular import _preprocess, xr_phenometrics, phenology_circular_trends, circular_mean_and_median, regression_attribution, IOS_analysis
 sys.path.append('/g/data/os22/chad_tmp/AusEFlux/src/')
 from _utils import start_local_dask
 sys.path.append('/g/data/os22/chad_tmp/AusEFlux/src/')
@@ -27,7 +27,7 @@ from _utils import round_coords
 ## varibles for script
 n_workers=102
 memory_limit='450GiB'
-integral_var = 'IOC'
+integral_var = 'IOS'
 regress_var = 'vPOS'
 modelling_vars=['co2', 'srad', 'rain', 'tavg', 'vpd']
 results_path = '/g/data/os22/chad_tmp/Aus_phenology/results/combined_tiles/'
@@ -49,10 +49,11 @@ def phenometrics_etal(
     #open data
     d_path = f'/g/data/os22/chad_tmp/Aus_phenology/data/tiled_data/NDVI_{n}.nc'
     dd_path = f'/g/data/os22/chad_tmp/Aus_phenology/data/tiled_data/COVARS_{n}.nc'
-    ss_path = f'/g/data/xc0/project/AusEFlux/data/ndvi_of_baresoil_5km.nc'
+    ss_path = f'/g/data/os22/chad_tmp/Aus_phenology/data/tiled_data/SS_{n}.nc'
+    # ss_path = f'/g/data/xc0/project/AusEFlux/data/ndvi_of_baresoil_5km.nc'
     d = assign_crs(xr.open_dataarray(d_path), crs='epsg:4326')
     dd = assign_crs(xr.open_dataset(dd_path), crs='epsg:4326')
-    ss = assign_crs(xr.open_dataarray(ss_path), crs='epsg:4326')
+    ss = assign_crs(xr.open_dataset(ss_path)['NDVI'], crs='epsg:4326')
     ss.name = 'NDVI'
     
     # transform the data and return all the objects we need. This code smooth and
@@ -105,7 +106,7 @@ def phenometrics_etal(
     if os.path.exists(f'{results_path}mean_phenology_perpixel_{n}.nc'):
         pass
     else:
-        p_average = [_mean(x) for x in results]
+        p_average = [circular_mean_and_median(x) for x in results]
         p_average = dask.compute(p_average)[0]
         p_average = xr.combine_by_coords(p_average)
         
@@ -123,9 +124,9 @@ def phenometrics_etal(
     else:
     
         trend_vars = ['POS','vPOS','TOS','vTOS','AOS','SOS','vSOS','EOS',
-                      'vEOS','LOS','LOC', 'IOS','IOC','ROG','ROS',
-                      'LOS*vPOS','IOS:(LOS*vPOS)', 'LOC*vPOS','IOC:(LOC*vPOS)']
-        p_trends = [phenology_trends(x, trend_vars) for x in results]
+                      'vEOS','LOS','LOC', 'IOS','IOC','ROG','ROS'
+                      ]
+        p_trends = [phenology_circular_trends(x, trend_vars) for x in results]
         p_trends = dask.compute(p_trends)[0]
         p_trends = xr.combine_by_coords(p_trends)
         
@@ -137,17 +138,17 @@ def phenometrics_etal(
         p_trends.to_netcdf(f'{results_path}trends_phenology_perpixel_{n}.nc')
     
     # ----Partial correlation analysis etc. on IOS -----------------
-    if os.path.exists(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc'):
-        pass
-    else:
-        p_parcorr = []
-        for pheno in results:            
-            corr = IOS_analysis(pheno, ios_template, pheno_var=integral_var)
-            p_parcorr.append(corr)
+    # if os.path.exists(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc'):
+    #     pass
+    # else:
+    #     p_parcorr = []
+    #     for pheno in results:            
+    #         corr = IOS_analysis(pheno, ios_template, pheno_var=integral_var)
+    #         p_parcorr.append(corr)
         
-        p_parcorr = dask.compute(p_parcorr)[0]
-        p_parcorr = xr.combine_by_coords(p_parcorr).astype('float32')
-        p_parcorr.to_netcdf(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc')
+    #     p_parcorr = dask.compute(p_parcorr)[0]
+    #     p_parcorr = xr.combine_by_coords(p_parcorr).astype('float32')
+    #     p_parcorr.to_netcdf(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc')
     
     # # -----regression attribution iterate-------------------------------
     # for model_type in ['delta_slope', 'PLS', 'PCMCI', 'ML']:
