@@ -138,17 +138,17 @@ def phenometrics_etal(
         p_trends.to_netcdf(f'{results_path}trends_phenology_perpixel_{n}.nc')
     
     # ----Partial correlation analysis etc. on IOS -----------------
-    # if os.path.exists(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc'):
-    #     pass
-    # else:
-    #     p_parcorr = []
-    #     for pheno in results:            
-    #         corr = IOS_analysis(pheno, ios_template, pheno_var=integral_var)
-    #         p_parcorr.append(corr)
+    if os.path.exists(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc'):
+        pass
+    else:
+        p_parcorr = []
+        for pheno in results:            
+            corr = IOS_analysis(pheno, ios_template, pheno_var=integral_var)
+            p_parcorr.append(corr)
         
-    #     p_parcorr = dask.compute(p_parcorr)[0]
-    #     p_parcorr = xr.combine_by_coords(p_parcorr).astype('float32')
-    #     p_parcorr.to_netcdf(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc')
+        p_parcorr = dask.compute(p_parcorr)[0]
+        p_parcorr = xr.combine_by_coords(p_parcorr).astype('float32')
+        p_parcorr.to_netcdf(f'{results_path}{integral_var}_analysis_perpixel_{n}.nc')
     
     # # -----regression attribution iterate-------------------------------
     # for model_type in ['delta_slope', 'PLS', 'PCMCI', 'ML']:

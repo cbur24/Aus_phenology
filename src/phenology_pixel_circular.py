@@ -9,14 +9,16 @@ import os
 import sys
 import math
 import shap
+import dask
 import scipy
 import numpy as np
 import xarray as xr
 import pandas as pd
 import pingouin as pg
 from scipy import stats
-from scipy.stats import circmean, circstd
 from datetime import datetime
+from scipy.stats import circmean, circstd
+from scipy.stats import pearsonr, chi2
 from collections import namedtuple
 from odc.geo.xr import assign_crs
 from odc.algo._percentile import xr_quantile
@@ -32,7 +34,8 @@ from tigramite.independence_tests.robust_parcorr import RobustParCorr
 import pymannkendall as mk
 from pymannkendall.pymannkendall import __preprocessing, __missing_values_analysis, __mk_score, __variance_s, __z_score, __p_value, sens_slope
 
-import dask
+sys.path.append('/g/data/os22/chad_tmp/Aus_phenology/src')
+from LC_regression import circular_model, fit_circular_model, calculate_beta_significance
 
 
 def months_filter(month, start, end):
@@ -424,7 +427,7 @@ def circular_mean_and_median(ds):
 
 def remove_circular_outliers_and_unwrap(
     angles,
-    n_sigma=1.75
+    n_sigma=2.0
 ): 
     """
     Detect outliers in circular data using circular statistics,
@@ -440,7 +443,7 @@ def remove_circular_outliers_and_unwrap(
         
     Returns:
     --------
-    result : Data with outliers removed and np.unwrap applied
+    result : Data with outliers replaced with NaNs and np.unwrap applied
     
     """
     data_copy = angles.copy()
@@ -469,7 +472,6 @@ def remove_circular_outliers_and_unwrap(
     result[~outlier_mask] = unwrapped_clean
     
     return result
-
 
 def mk_with_slopes(x_old, alpha = 0.05):
     """
@@ -500,12 +502,15 @@ def mk_with_slopes(x_old, alpha = 0.05):
     return res(p, slope, intercept)
 
 @dask.delayed
-def phenology_circular_trends(ds, vars):
+def phenology_circular_trends(ds, vars, n_sigma=2):
     """
     Calculate robust statistics over phenology
     time series using MannKendal/Theil-Sen.
     
-    Accounting for circular variables like dayofyear vars
+    Accounting for circular variables like dayofyear by
+    converting to radians, unwrapping result, and then
+    applying trend analysis.
+    
     """
     slopes=[]
     p_values=[]
@@ -524,38 +529,54 @@ def phenology_circular_trends(ds, vars):
             data['theta'] = data['day_of_year']*((2*np.pi)/data['days_in_year'])
             
             # Then unwrap to deal with calendar crossing and do linear trend on unwrapped theta
-            #  We will try to remove outliers so decrease introducing discontunties in the time series.
-            data['theta_unwrap'] = remove_circular_outliers_and_unwrap(data['theta'], n_sigma=1.75)
-            
+            #  We will try to remove outliers so we don't introducing discontunties in the time series.
+            data['theta_unwrap'] = remove_circular_outliers_and_unwrap(data['theta'], n_sigma=n_sigma)
             p_value, slope, intercept = mk_with_slopes(data['theta_unwrap'])
             slope_doy = slope * 365 / (2 * np.pi)
-            
-            # Also calculate trends on orthogonal components as alternative method
-            # because on edge cases theta_unwrap method fails
-            # data['x'] = np.cos(data['theta'])
-            # data['y'] = np.sin(data['theta'])
-            # p_value_x, slope_x, intercept_x = mk_with_slopes(data['x'])
-            # p_value_y, slope_y, intercept_y = mk_with_slopes(data['y'])
-            # slope_components = np.sqrt(slope_x**2 + slope_y**2)
-            # slope_components_doy = slope_components * 365 / (2 * np.pi)
-            # combined_p_value = max(p_value_x, p_value_y)
-            
-            # Now check if the theta_unwrap slope magnitude is similar
-            # to the linear slope mangnitude (absolute magnitudes). If they diverge greatly then
-            # the theta unwrap method has introduced discontinuities and we revert
-            # to the simple linear method.
-            linear = mk_with_slopes(ds[var].squeeze().values)
-            if np.abs(slope_doy) > 3*np.abs(linear.slope):
-                slope_doy = np.nan #linear.slope
-                p_value = np.nan #linear.p
-             
+
+            #if slope is unreasonably large then the unwrapping has
+            # likely failed. Retry with a more aggressive outlier filter
+            if np.abs(slope_doy) > 2.5:
+                data['theta_unwrap'] = remove_circular_outliers_and_unwrap(data['theta'], n_sigma=1.5)
+                p_value, slope, intercept = mk_with_slopes(data['theta_unwrap'])
+                slope_doy = slope * 365 / (2 * np.pi)
+
+                # if slope is still unreasonably large then fit a linear-circular
+                # regression model of the type y=mu+2atan(Bx) and return the
+                # beta coefficient as a substitute for the linear coefficient.
+                # Beta is not strictly the same as a linear coefficient but the trend
+                # direction will be correct and magnitudes will likley be an underestimate of
+                # the true linear coefficient. The linear approach only fails on 1-2% of 
+                # pixels across Australia.
+                if np.abs(slope_doy) > 3:
+                    x = data.index.values # values from 1-~39
+                    x = x-np.mean(x) #centre around 0
+                    y_obs = data['theta'].where(~np.isnan(data['theta_unwrap']))
+                    weights = np.ones_like(x)  # Equal weights for simplicity
+                    
+                    # Fit the LC regression model
+                    optimal_params, objective_value = fit_circular_model(x, y_obs, weights)
+                    fitted_mu, fitted_beta = optimal_params
+                    slope_doy = fitted_beta * 365 / (2 * np.pi)
+                    
+                    # Compute p-value for beta
+                    p_value = calculate_beta_significance(x, y_obs, weights, kappa=1, wls_weight=0.5)
+
+                    # if it still fails return nans
+                    if np.abs(slope_doy) > 3:
+                        slope_doy=np.nan
+                        p_value = np.nan
+                    
+            #create dataframe
             df = pd.DataFrame({
                 f'{var}_slope': [slope_doy],
                 f'{var}_p_value': [p_value],
                 })
-            
+
+            #convert to xarray
             dss = df.to_xarray().squeeze().expand_dims(latitude=ds.latitude,longitude=ds.longitude).drop_vars('index')
-            
+
+            #add variables to lists
             slopes.append(dss[f'{var}_slope'])
             p_values.append(dss[f'{var}_p_value'])
         
@@ -585,23 +606,105 @@ def phenology_circular_trends(ds, vars):
     #export a dataset
     return xr.merge([slopes_xr,p_values_xr]).astype('float32')
 
+
+def parcorr_with_circular_vars(data, circular_vars, linear_vars, target_var):
+    """
+    Calculate partial correlations between variables and a target properly handling
+    circular variables by decomposing them into sine and cosine components and 
+    using the embedding approach
+    
+    Parameters:
+    data: pd.Dataframe
+    circular_vars: List of column names for circular variables
+    linear_vars: List of column names for linear variables
+    target_var: Name of the target variable
+    
+    Returns:
+    pd.DataFrame: Partial correlations with target_var
+    
+    """
+    # Convert circular variables to sine and cosine components
+    expanded_data = data.copy()
+    
+    for var in circular_vars:
+        # Convert DOY to radians
+        radians = 2 * np.pi * (data[var] - 1) / 366
+        
+        # Create sine and cosine components
+        expanded_data[f"{var}_sin"] = np.sin(radians)
+        expanded_data[f"{var}_cos"] = np.cos(radians)
+        
+        # Drop original circular variable
+        expanded_data = expanded_data.drop(columns=[var])
+    
+    # Create list of all predictor variables
+    circular_components = [f"{var}_{comp}" for var in circular_vars 
+                         for comp in ['sin', 'cos']]
+
+    all_predictors = circular_components + linear_vars
+    expanded_data = expanded_data[[target_var]+all_predictors]
+    
+    # Calculate partial correlation between all vars
+    results_df = pg.pairwise_corr(expanded_data,
+            columns=[target_var]) #[[target_var],all_predictors]
+    
+    # # Process final results
+    final_results = []
+    
+    # Process linear variables directly
+    for var in linear_vars:
+        row = results_df[results_df['Y'] == var].iloc[0]
+
+        final_results.append({
+            'Y': var,
+            'r': row['r'],
+            # 'p': row['p-unc']
+        })
+    
+    # Combine sine and cosine components for circular variables
+    for var in circular_vars:
+        sin_row = results_df[results_df['Y'] == f"{var}_sin"].iloc[0]
+        cos_row = results_df[results_df['Y'] == f"{var}_cos"].iloc[0]
+        n = len(expanded_data[f"{var}_cos"])
+        
+        # Calculate magnitude of correlation, reimplementation of here: 
+        # https://pingouin-stats.org/build/html/_modules/pingouin/circular.html#circ_corrcl
+        rcs = pearsonr(expanded_data[f"{var}_sin"], expanded_data[f"{var}_cos"])[0]
+        rxc = cos_row['r']
+        rxs = sin_row['r']
+       
+        r = np.sqrt((rxc**2 + rxs**2 - 2 * rxc * rxs * rcs) / (1-rcs**2))
+       
+        # Compute p-value
+        p_value = chi2.sf(n * r**2, 2)
+        
+        final_results.append({
+            'Y': var,
+            'r': r,
+            # 'p': p_value
+        })
+    
+    return pd.DataFrame(final_results).set_index('Y').transpose().reset_index(drop=False)
+
+
 @dask.delayed
 def IOS_analysis(
     pheno, #pheno data
     template,
     pheno_var='IOS',
     rolling=1,
-    modelling_vars=['vPOS','vSOS','vEOS','SOS','POS','EOS']
+    linear_vars=['vPOS','vSOS','vEOS'],
+    circular_vars=['SOS','POS','EOS']
 ):  
     """
     Find the partial correlation coefficients between IOS(C) and
     other seasonality metrics. 
     """
     if pheno_var=='IOS':
-        modelling_vars=modelling_vars+['LOS']
+        linear_vars=linear_vars+['LOS']
 
     if pheno_var=='IOC':
-        modelling_vars=modelling_vars+['vTOS','LOC']
+        linear_vars=linear_vars+['vTOS','LOC']
         
     #check if this is a no-data pixel
     if np.isnan(pheno.vPOS.isel(index=0).values.item()):
@@ -617,19 +720,9 @@ def IOS_analysis(
         #rolling means to squeeze out IAV (leaving this here as configurable but not smoothing data anymore)
         df = pheno.squeeze().to_dataframe().drop(['latitude','longitude'], axis=1).rolling(rolling).mean().dropna()
 
-        #--------------partial correlation with IOC -----
-        p_corr = pg.pairwise_corr(df,
-                         columns=[[pheno_var], modelling_vars]) 
-            
-        p_corr = p_corr[['Y','r']].set_index('Y').transpose().reset_index(drop=True)
-        
-        # --------Slope and pearson R between IOC and LOS*vPOS ---------
-        # result = stats.linregress(df['LOS*vPOS'], df[pheno_var])
-        # slope = result.slope
-        # pearson_r = result.rvalue
-        # p_corr[f'slope_{pheno_var}_vs_LOS*vPOS'] = slope
-        # p_corr[f'pearson_r_{pheno_var}_vs_LOS*vPOS'] = pearson_r
-
+        #--------------partial correlation with IOS -----
+        p_corr = parcorr_with_circular_vars(df, circular_vars, linear_vars, pheno_var)
+    
         # tidy up
         lat = pheno.latitude.item()
         lon = pheno.longitude.item()
