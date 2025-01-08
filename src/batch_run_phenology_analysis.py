@@ -18,7 +18,7 @@ from odc.geo.xr import assign_crs
 
 import sys
 sys.path.append('/g/data/os22/chad_tmp/Aus_phenology/src')
-from phenology_pixel_circular import _preprocess, xr_phenometrics, phenology_circular_trends, circular_mean_and_median, regression_attribution, IOS_analysis
+from phenology_pixel_circular import _preprocess, xr_phenometrics, phenology_circular_trends, circular_mean_and_stddev, regression_attribution, IOS_analysis
 sys.path.append('/g/data/os22/chad_tmp/AusEFlux/src/')
 from _utils import start_local_dask
 sys.path.append('/g/data/os22/chad_tmp/AusEFlux/src/')
@@ -106,7 +106,7 @@ def phenometrics_etal(
     if os.path.exists(f'{results_path}mean_phenology_perpixel_{n}.nc'):
         pass
     else:
-        p_average = [circular_mean_and_median(x) for x in results]
+        p_average = [circular_mean_and_stddev(x) for x in results]
         p_average = dask.compute(p_average)[0]
         p_average = xr.combine_by_coords(p_average)
         
@@ -132,7 +132,7 @@ def phenometrics_etal(
         
         #remove NaNs
         p_trends = p_trends.where(~np.isnan(p_average.vPOS)).astype('float32')
-    
+        
         # assign crs and export
         p_trends = assign_crs(p_trends, crs='EPSG:4326')
         p_trends.to_netcdf(f'{results_path}trends_phenology_perpixel_{n}.nc')

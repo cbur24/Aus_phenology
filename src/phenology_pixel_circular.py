@@ -17,7 +17,7 @@ import pandas as pd
 import pingouin as pg
 from scipy import stats
 from datetime import datetime
-from scipy.stats import circmean, circstd
+from scipy.stats import circmean, circstd, false_discovery_control
 from scipy.stats import pearsonr, chi2
 from collections import namedtuple
 from odc.geo.xr import assign_crs
@@ -33,13 +33,6 @@ from tigramite.independence_tests.robust_parcorr import RobustParCorr
 
 import pymannkendall as mk
 from pymannkendall.pymannkendall import __preprocessing, __missing_values_analysis, __mk_score, __variance_s, __z_score, __p_value, sens_slope
-
-sys.path.append('/g/data/os22/chad_tmp/Aus_phenology/src')
-from LC_regression import circular_model, fit_circular_model, calculate_beta_significance
-
-
-def months_filter(month, start, end):
-    return (month >= start) & (month <= end)
 
 def _preprocess(d, dd, ss):
     """
@@ -355,11 +348,12 @@ def xr_phenometrics(da,
 
 
 @dask.delayed
-def circular_mean_and_median(ds):
+def circular_mean_and_stddev(ds):
+    
     # count number of seasons
-    # and how many years was this over?
     n_seasons = len(ds.index)
     
+    # and how many years was this over?
     a = ds.POS_year.isel(index=0).values.item()
     b = ds.POS_year.isel(index=-1).values.item()
     
@@ -368,7 +362,7 @@ def circular_mean_and_median(ds):
     else:
         n_years = len([i for i in range(int(a),int(b)+1)])
     
-    #first check if its nodata and do a quick mean
+    #Now check if its nodata and do a quick mean so we return nodata
     if np.isnan(ds.vPOS.isel(index=0).values.item()):
         dd = ds.mean('index')
         
@@ -389,20 +383,20 @@ def circular_mean_and_median(ds):
             data['theta'] = data['day_of_year']*((2*np.pi)/data['days_in_year'])
             data['theta_unwrap'] = np.unwrap(data['theta'])
             
-            # Calculate circular mean, convert back to DOY
+            # Calculate circular mean and stddev, convert back to DOY
             circular_mean = circmean(data['theta'], nan_policy='omit')
             circular_std = circstd(data['theta'], nan_policy='omit')
             circular_mean_doy = circular_mean / (2 * np.pi) * 365
-            # circular_std_doy = circular_std / (2 * np.pi) * 365
+            circular_std_doy = circular_std / (2 * np.pi) * 365
         
             df = pd.DataFrame({
                 f'{var}': [circular_mean_doy],
-                # f'{var}_std': [circular_std_doy],
+                f'{var}_std': [circular_std_doy],
                 })
         
             circ_stats.append(df)
 
-        # For the other variables use Kirill's quantile function (median stats)
+        # For the other variables use Kirill's quantile function (fast median stats)
         dd_circ = pd.concat(circ_stats, axis=1).to_xarray().squeeze().expand_dims(latitude=ds.latitude,longitude=ds.longitude).drop_vars('index')
         ds = ds.transpose('index', 'latitude', 'longitude')
         other_vars=['vTOS','vSOS','vPOS','vEOS','AOS','LOS','IOS','IOC','LOC','ROG','ROS']
@@ -534,13 +528,14 @@ def phenology_circular_trends(ds, vars, n_sigma=2):
             p_value, slope, intercept = mk_with_slopes(data['theta_unwrap'])
             slope_doy = slope * 365 / (2 * np.pi)
 
-            #if slope is unreasonably large then the unwrapping has
+            # if slope is unreasonably large then the unwrapping has
             # likely failed. Retry with a more aggressive outlier filter
             if np.abs(slope_doy) > 2.5:
                 data['theta_unwrap'] = remove_circular_outliers_and_unwrap(data['theta'], n_sigma=1.5)
                 p_value, slope, intercept = mk_with_slopes(data['theta_unwrap'])
                 slope_doy = slope * 365 / (2 * np.pi)
 
+                #----ignore--------------------------------------------
                 # if slope is still unreasonably large then fit a linear-circular
                 # regression model of the type y=mu+2atan(Bx) and return the
                 # beta coefficient as a substitute for the linear coefficient.
@@ -548,24 +543,25 @@ def phenology_circular_trends(ds, vars, n_sigma=2):
                 # direction will be correct and magnitudes will likley be an underestimate of
                 # the true linear coefficient. The linear approach only fails on 1-2% of 
                 # pixels across Australia.
-                if np.abs(slope_doy) > 3:
-                    x = data.index.values # values from 1-~39
-                    x = x-np.mean(x) #centre around 0
-                    y_obs = data['theta'].where(~np.isnan(data['theta_unwrap']))
-                    weights = np.ones_like(x)  # Equal weights for simplicity
+                # if np.abs(slope_doy) > 2.5:
+                #     x = data.index.values # values from 1-~39
+                #     x = x-np.mean(x) #centre around 0
+                #     y_obs = data['theta'].where(~np.isnan(data['theta_unwrap']))
+                #     weights = np.ones_like(x)  # Equal weights for simplicity
                     
-                    # Fit the LC regression model
-                    optimal_params, objective_value = fit_circular_model(x, y_obs, weights)
-                    fitted_mu, fitted_beta = optimal_params
-                    slope_doy = fitted_beta * 365 / (2 * np.pi)
+                #     # Fit the LC regression model
+                #     optimal_params, objective_value = fit_circular_model(x, y_obs, weights)
+                #     fitted_mu, fitted_beta = optimal_params
+                #     slope_doy = fitted_beta * 365 / (2 * np.pi)
                     
-                    # Compute p-value for beta
-                    p_value = calculate_beta_significance(x, y_obs, weights, kappa=1, wls_weight=0.5)
-
-                    # if it still fails return nans
-                    if np.abs(slope_doy) > 3:
-                        slope_doy=np.nan
-                        p_value = np.nan
+                #     # Compute p-value for beta
+                #     p_value = calculate_beta_significance(x, y_obs, weights, kappa=1, wls_weight=0.5)
+                # -------------------------------------------------------
+                
+                # if it still fails return nans
+                if np.abs(slope_doy) > 2.5:
+                    slope_doy=np.nan
+                    p_value = np.nan
                     
             #create dataframe
             df = pd.DataFrame({
@@ -646,7 +642,7 @@ def parcorr_with_circular_vars(data, circular_vars, linear_vars, target_var):
     
     # Calculate partial correlation between all vars
     results_df = pg.pairwise_corr(expanded_data,
-            columns=[target_var]) #[[target_var],all_predictors]
+            columns=[target_var], padjust='none') #[[target_var],all_predictors]
     
     # # Process final results
     final_results = []
@@ -676,7 +672,7 @@ def parcorr_with_circular_vars(data, circular_vars, linear_vars, target_var):
         r = np.sqrt((rxc**2 + rxs**2 - 2 * rxc * rxs * rcs) / (1-rcs**2))
        
         # Compute p-value
-        p_value = chi2.sf(n * r**2, 2)
+        # p_value = chi2.sf(n * r**2, 2)
         
         final_results.append({
             'Y': var,
