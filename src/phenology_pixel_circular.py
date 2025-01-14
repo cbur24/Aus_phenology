@@ -216,10 +216,11 @@ def xr_phenometrics(da,
         * ``'SOS'``: DOY of start of season
         * ``'POS'``: DOY of peak of season
         * ``'EOS'``: DOY of end of season
+        * ``'TOS'``: DOY of the minimum at the beginning of cycle (left of peak)
+        * ``'VGS/VSS'``: Time allocation ratio between green-up and senescene periods
         * ``'vSOS'``: Value at start of season
         * ``'vPOS'``: Value at peak of season
         * ``'vEOS'``: Value at end of season
-        * ``'TOS'``: DOY of the minimum at the beginning of cycle (left of peak)
         * ``'vTOS'``: Value at the beginning of cycle (left of peak)
         * ``'LOS'``: Length of season (DOY)
         * ``'LOC'``: Length of cycle (trough to trough) (DOY)
@@ -234,6 +235,7 @@ def xr_phenometrics(da,
     Xarray dataset with phenometrics. Xarray is a 1D array.
     
     """
+    
     #Extract peaks and troughs in the timeseries
     peaks_troughs = _extract_peaks_troughs(
                          da,
@@ -330,6 +332,9 @@ def xr_phenometrics(da,
         # Rate of growth and sensecing (NDVI per day)
         vars['ROG'] = (vars['vPOS'] - vars['vSOS']) / ((pd.to_datetime(pos.values) - pd.to_datetime(sos.values)).days)
         vars['ROS'] = (vars['vEOS'] - vars['vPOS']) / ((pd.to_datetime(eos.values) - pd.to_datetime(pos.values)).days)
+
+        # Ratio between green-up time and senescence time (Meng et al. 2024)
+        # vars['VGU/VSS'] = (vars['POS']-vars['SOS'])/(vars['EOS']-vars['POS'])
         
         pheno[idx] = vars
 
@@ -345,7 +350,6 @@ def xr_phenometrics(da,
         ds[var] = ds[var].expand_dims(latitude=[lat], longitude = [lon])
     
     return ds
-
 
 @dask.delayed
 def circular_mean_and_stddev(ds):
@@ -734,11 +738,11 @@ def regression_attribution(
     template,
     model_type='PLS',
     pheno_var='vPOS',
-    rolling=5,
+    rolling=1,
     modelling_vars=['srad','co2','rain','tavg','vpd']
 ):
     """
-    Develop regression models or between a phenological
+    Develop regression models between a phenological
     variable and modelling covariables such as climate data. 
 
     returns:
@@ -798,20 +802,17 @@ def regression_attribution(
         #get all xarrays into the same dims etc.
         pheno_variable = pheno_df[pheno_var].to_xarray()
 
-        #now add our phenometric to the covars-we have a neat object to work with
+        #now add our phenometric to the covars- so we have a neat object to work with
         c[pheno_var] = pheno_variable
         
         #--------------- modelling---------------------------------------------------
-        # fit rolling annuals to remove some of the IAV (only interested in trends)
+        # fit rolling annuals to remove some of the IAV (controllable)
         df = c.rolling(year=rolling, min_periods=rolling).mean().to_dataframe().dropna()
 
         #fit a model with all vars
         x = df[modelling_vars]
         y = df[pheno_var]        
 
-        # print(x)
-        # print(y)
-        
         if model_type=='ML':
             #fit a RF model with all vars
             rf = RandomForestRegressor(n_estimators=100).fit(x, y)
