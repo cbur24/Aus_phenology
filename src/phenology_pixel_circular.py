@@ -206,7 +206,7 @@ def xr_phenometrics(da,
     
     Identifies the start and end points of each cycle using 
     the `seasonal amplitude` method. When the vegetation time series reaches
-    20% of the seasonal amplitude between the first minimum and the peak,
+    20 % of the seasonal amplitude between the first minimum and the peak,
     and the peak and the second minimum.
     
     To ensure we are measuring only full cycles we enforce the time series to
@@ -217,7 +217,6 @@ def xr_phenometrics(da,
         * ``'POS'``: DOY of peak of season
         * ``'EOS'``: DOY of end of season
         * ``'TOS'``: DOY of the minimum at the beginning of cycle (left of peak)
-        * ``'VGS/VSS'``: Time allocation ratio between green-up and senescene periods
         * ``'vSOS'``: Value at start of season
         * ``'vPOS'``: Value at peak of season
         * ``'vEOS'``: Value at end of season
@@ -503,7 +502,7 @@ def mk_with_slopes(x_old, alpha = 0.05):
 def phenology_circular_trends(ds, vars, n_sigma=2):
     """
     Calculate robust statistics over phenology
-    time series using MannKendal/Theil-Sen.
+    time series using Mann-Kendal/Theil-Sen.
     
     Accounting for circular variables like dayofyear by
     converting to radians, unwrapping result, and then
@@ -620,7 +619,7 @@ def parcorr_with_circular_vars(data, circular_vars, linear_vars, target_var):
     target_var: Name of the target variable
     
     Returns:
-    pd.DataFrame: Partial correlations with target_var
+    pd.DataFrame: Partial correlations with `target_var`
     
     """
     # Convert circular variables to sine and cosine components
@@ -639,7 +638,7 @@ def parcorr_with_circular_vars(data, circular_vars, linear_vars, target_var):
     
     # Create list of all predictor variables
     circular_components = [f"{var}_{comp}" for var in circular_vars 
-                         for comp in ['sin', 'cos']]
+                           for comp in ['sin', 'cos']]
 
     all_predictors = circular_components + linear_vars
     expanded_data = expanded_data[[target_var]+all_predictors]
@@ -697,7 +696,7 @@ def IOS_analysis(
     circular_vars=['SOS','POS','EOS']
 ):  
     """
-    Find the partial correlation coefficients between IOS(C) and
+    Find the partial correlation coefficients between IOS and
     other seasonality metrics. 
     """
     if pheno_var=='IOS':
@@ -990,143 +989,6 @@ def regression_attribution(
         #     c = c.drop_vars('spatial_ref')
         #     c = c.assign_coords(year=y)
         #     clim.append(c)
-
-# @dask.delayed
-# def pls_phenology_modelling(data, #NDVI data
-#              X, #covariables             
-#              rolling=90,
-#              distance=90,
-#              plateau_size=10,
-#              prominence='auto', 
-#              verbose=True
-#         ):
-#     #-----Calculate vPOS and POS--------------
-#     #Extract peaks and troughs in the timeseries
-#     peaks_troughs = _extract_peaks_troughs(
-#                          data,
-#                          rolling=rolling,
-#                          distance=distance,
-#                          prominence=prominence,
-#                          plateau_size=plateau_size
-#                             )
-    
-#     # start the timeseries with trough
-#     if np.isnan(peaks_troughs.iloc[0].troughs):
-#         p_t = peaks_troughs.iloc[1:]
-#     else:
-#         p_t = peaks_troughs
-    
-#     # end the timeseries with trough
-#     if np.isnan(p_t.iloc[-1].troughs)==True:
-#         p_t = p_t.iloc[0:-1]
-        
-#     # Store phenology stats
-#     pheno = {}
-    
-#     peaks_only = p_t.peaks.dropna()
-#     for peaks, idx in zip(peaks_only.index, range(0,len(peaks_only))):
-#         # First we extract the trough times either side of the peak
-#         start_time = p_t.iloc[p_t.index.get_loc(peaks)-1].name
-#         end_time = p_t.iloc[p_t.index.get_loc(peaks)+1].name
-    
-#         # now extract the NDVI time series for the cycle
-#         ndvi_cycle = data.sel(time=slice(start_time, end_time))
-        
-#         # add the stats to this
-#         vars = {}
-       
-#         # --Extract phenometrics---------------------------------
-#         pos = ndvi_cycle.idxmax(skipna=True)
-#         vars['POS_year'] = pos.dt.year #so we can keep track
-#         vars['POS'] = pos.dt.dayofyear.values
-#         vars['vPOS'] = ndvi_cycle.max().values
-#         pheno[idx] = vars
-
-#     pheno = pd.DataFrame(pheno).astype('float32').transpose()  
-    
-#     #-------Get phenometrics and covariables in the same frame-------
-#     def months_filter(month, start, end):
-#         return (month >= start) & (month <= end)
-
-#     #find average time for POS - just use a random year
-#     mean_pos = pd.Timestamp(datetime.strptime(f'{2000} {int(pheno.POS.mean())}', '%Y %j'))
-
-#     #subtract 2 months to find the month-range for summarising climate
-#     months_before = mean_pos - pd.DateOffset(months=1)
-#     m_r = months_before.month, mean_pos.month
-
-#     #now we meed to index the covariable data by the range of months
-#     trimmed_climate = X.sel(time=months_filter(X.time.dt.month, m_r[0], m_r[-1]))
-    
-#     #calculate annual climate summary stats
-#     rain=trimmed_climate['rain']
-#     rain=rain.groupby('time.year').sum()
-#     trimmed_climate = trimmed_climate[['co2', 'srad', 'tavg', 'vpd']]
-#     annual_climate = trimmed_climate.groupby('time.year').mean()
-#     annual_climate = annual_climate.sel(year=pheno['POS_year'].values)
-#     annual_climate['rain'] = rain.sel(year=pheno['POS_year'].values)
-
-#     # join our POS metric to the climate data after updating
-#     # index of our metric with the years
-#     pheno['vPOS'].index = pheno['POS_year'].values
-#     pheno['vPOS'].index.name = 'year'
-
-#     #get all xarrays into the same dims etc.
-#     lat = data.latitude.item()
-#     lon = data.longitude.item()
-#     pheno_vPOS = pheno['vPOS'].to_xarray().expand_dims(latitude=[lat],longitude=[lon])
-#     annual_climate = annual_climate.drop_vars(['spatial', 'latitude', 'longitude']).squeeze()    
-#     annual_climate.assign_coords(latitude=lat, longitude=lon)
-    
-#     for var in annual_climate.data_vars:
-#         annual_climate[var] = annual_climate[var].expand_dims(latitude=[lat], longitude = [lon])
-
-#     #now add our phenometric to the covars-we have a neat object to work with
-#     annual_climate['vPOS'] = pheno_vPOS
-
-#     #---------------PLS modelling----------------------------------------------------------------------
-#     # fit PLS on rolling annuals to remove some of the IAV (only interested in trends)
-#     df = annual_climate.squeeze().rolling(year=5, min_periods=5).mean().drop_vars('spatial_ref').to_dataframe()
-#     df = df.dropna()
-            
-#     #fit a model with all vars
-#     x = df[['co2','srad', 'rain','tavg', 'vpd']]
-#     y = df['vPOS']
-#     lr = PLSRegression().fit(x, y)
-#     prediction = lr.predict(x)
-#     r2_all = r2_score(y, prediction)
-    
-#     # Find the robust slope of actual
-#     result_actual = mk.original_test(y, alpha=0.05)
-#     p_actual = result_actual.p
-#     s_actual = result_actual.slope
-#     i_actual = result_actual.intercept
-    
-#     #calculate slope of predicted variable with all params
-#     result_prediction = mk.original_test(prediction, alpha=0.05)
-#     p_prediction = result_prediction.p
-#     s_prediction = result_prediction.slope
-#     i_prediction = result_prediction.intercept
-
-#     #get the PLS coefficients
-#     fi = pd.Series(dict(zip(list(x.columns), list(lr.coef_.reshape(len(x.columns)))))).to_frame()
-#     fi = fi.rename({0:'PLS_coefficent'},axis=1)
-#     fi = fi.reset_index().rename({'index':'feature'},axis=1).set_index('feature')
-    
-#     # create tidy df with all stats
-#     # fi['phenometric'] = 'vPOS'
-#     fi['slope_actual'] = s_actual
-#     fi['slope_modelled'] = s_prediction
-#     fi['p_actual'] = p_actual
-#     fi['p_modelled'] = p_prediction
-#     fi['i_actual'] = i_actual
-#     fi['i_modelled'] = i_prediction
-#     fi['r2'] = r2_all
-
-#     fi = fi.to_xarray().squeeze().expand_dims(latitude=[lat],longitude=[lon])
-#     return fi
-
-
 
 
 
