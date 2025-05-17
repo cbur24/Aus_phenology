@@ -446,14 +446,14 @@ def remove_circular_outliers_and_unwrap(
     data_copy = angles.copy()
     angles = np.asarray(angles)
     
-    # Calculate circular statistics
+    #circular statistics
     mean_angle = circmean(angles)
     std_angle = circstd(angles)
     
-    # Calculate circular distances from mean, using complex numbers on the unit circle
+    #circular distances from mean, using complex numbers
     distances = np.abs(np.angle(np.exp(1j * (angles - mean_angle))))
     
-    # Identify outliers based on circular standard deviation
+    # Identify outliers based on circular std. dev.
     outlier_mask = distances > (n_sigma * std_angle)
     
     # Remove outliers

@@ -1,10 +1,10 @@
 #!/bin/bash
  
-#PBS -P u46
+#PBS -P yx97
 #PBS -q normalsr
 #PBS -l ncpus=104
 #PBS -l mem=496gb
-#PBS -l walltime=02:00:00
+#PBS -l walltime=3:00:00
 #PBS -l storage=gdata/os22+gdata/xc0
  
 module load python3/3.10.0
